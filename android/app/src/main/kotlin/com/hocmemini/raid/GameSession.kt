@@ -17,7 +17,9 @@ import com.hocmemini.raid.game.headingDelta
 import com.hocmemini.raid.game.levelFor
 import com.hocmemini.raid.game.maxHpFor
 import com.hocmemini.raid.llm.Gemma
+import com.hocmemini.raid.game.Omen
 import com.hocmemini.raid.net.NearbyLink
+import com.hocmemini.raid.net.SignalScanner
 import com.hocmemini.raid.sensors.Compass
 import com.hocmemini.raid.sensors.DoubleTwist
 import com.hocmemini.raid.sensors.Environment
@@ -75,6 +77,7 @@ class GameSession(private val app: Application) {
     private var link: NearbyLink? = null
     private var gemma: Gemma? = null
     private val recorder = Recorder()
+    private val scanner = SignalScanner(app)
     private val vibrator = runCatching { app.getSystemService(VibratorManager::class.java)?.defaultVibrator }.getOrNull()
     /** Host: audio headers waiting for their STREAM payload, by endpoint. */
     private val pendingAudio = mutableMapOf<String, Msg.AudioHeader>()
@@ -235,19 +238,21 @@ class GameSession(private val app: Application) {
         val bearing = compass.heading.value
         val loc = locator.location.value
         val conditions = env.describe()
-        val (spawned, text) = runCatching { g.spawn(path, walked, conditions) }
+        val lair = state.value.bossLair
+        val (spawned, text) = runCatching { g.spawn(path, walked, conditions, lair?.let { "${it.name} (${it.lore})" }) }
             .getOrElse { state.update { s -> s.copy(busy = false).withLog("Gemma error: ${it.message}") }; broadcast(); return@launch }
         if (spawned == null) {
             state.update { it.copy(busy = false).withLog("The DM hesitates: ${text.take(200)}") }
         } else {
             // Exploring pays: every 4 steps walked since the last fight adds 1 HP (cap +50).
             val bonus = min(walked / 4, 50)
-            val hp = spawned.hp + bonus
-            val m = Monster(spawned.name, hp, hp, spawned.attacks, spawned.weakness, spawned.flavor, bearing, loc?.latitude ?: 0.0, loc?.longitude ?: 0.0, spawned.emoji)
+            val hp = (spawned.hp + bonus) * (if (lair != null) 3 else 2) / 2
+            val m = Monster(if (lair != null) "👑 ${spawned.name}" else spawned.name, hp, hp, spawned.attacks, spawned.weakness, spawned.flavor, bearing, loc?.latitude ?: 0.0, loc?.longitude ?: 0.0, spawned.emoji)
             steps.reset()
             state.update {
-                var s = it.copy(phase = Phase.BATTLE, monster = m, busy = false, turn = 0, steps = 0, env = env.summary.value, parries = emptyList())
+                var s = it.copy(phase = Phase.BATTLE, monster = m, busy = false, turn = 0, steps = 0, env = env.summary.value, parries = emptyList(), bossLair = null)
                     .withLog("${m.emoji} ${m.name} appears! ${m.flavor}")
+                if (lair != null) s = s.withLog("👑 BOSS FIGHT — champion of ${lair.name}. Double XP.")
                 if (conditions.isNotBlank()) s = s.withLog("(${conditions.replaceFirstChar { c -> c.uppercase() }}.)")
                 if (bonus > 0) s = s.withLog("It grew +$bonus HP from the $walked steps you walked.")
                 if (text.isNotBlank()) s = s.withLog(text.take(200))
@@ -255,6 +260,32 @@ class GameSession(private val app: Application) {
             }
             buzz(60)
         }
+        broadcast()
+    }
+
+    /** Host: scan Wi-Fi + BLE, let Gemma turn the names into lore; a menacing strong signal becomes a boss lair. */
+    fun scanOmens() = scope.launch {
+        val g = gemma ?: return@launch
+        if (role.value != Role.HOST || state.value.busy) return@launch
+        state.update { it.copy(busy = true).withLog("📡 You listen to the airwaves…") }; broadcast()
+        val signals = runCatching { scanner.scan() }.getOrElse { emptyList() }.take(6)
+        if (signals.isEmpty()) {
+            state.update { it.copy(busy = false).withLog("📡 Silence. No spirits haunt this place — wild country.") }; broadcast(); return@launch
+        }
+        val (texts, line) = runCatching { g.omens(signals.map { it.name }) }.getOrElse { null to "" }
+        if (texts == null) {
+            state.update { it.copy(busy = false).withLog("📡 ${signals.size} signals, but the DM can't read them: ${line.take(120)}") }; broadcast(); return@launch
+        }
+        val omens = signals.zip(texts).map { (sig, t) -> Omen(sig.name, t.name, t.lore, t.threat, sig.dbm) }
+        val lair = omens.filter { it.threat >= 4 }.maxByOrNull { it.dbm }
+        state.update { s ->
+            var next = s.copy(busy = false, omens = omens, bossLair = lair)
+            omens.forEach { o -> next = next.withLog("${"☠".repeat(o.threat)} ${o.name} (\"${o.signal}\", ${o.dbm} dBm): ${o.lore}") }
+            if (lair != null) next = next.withLog("👑 This is the lair of ${lair.name}. The next monster will be a BOSS.")
+            if (line.isNotBlank()) next = next.withLog(line.take(160))
+            next
+        }
+        buzz(40, 40, 40)
         broadcast()
     }
 
@@ -309,7 +340,8 @@ class GameSession(private val app: Application) {
         val newMonsterHp = (m.hp - dmg).coerceAtLeast(0)
         val newPlayerHp = (p.hp - hurt).coerceAtLeast(0)
         val killed = newMonsterHp == 0
-        val xpGain = (if (dmg > 0) 10 else 0) + (if (killed) 50 else 0)
+        val boss = m.name.startsWith("👑")
+        val xpGain = ((if (dmg > 0) 10 else 0) + (if (killed) 50 else 0)) * (if (boss) 2 else 1)
         val tag = buildString {
             append("−$dmg ${m.name}")
             if (flanking) append(" (flank!)")

@@ -152,6 +152,7 @@ fun PlayScreen(vm: GameSession) {
                     val e = if (isHost) envNow else state.env
                     if (e.isNotBlank()) append(" · $e")
                     if (vm.selfId in state.parries) append(" · 🛡 guard up")
+                    state.bossLair?.let { append(" · 👑 lair of ${it.name}") }
                     if (status.isNotBlank()) append(" · $status")
                 },
                 color = Color.White.copy(alpha = 0.85f), fontSize = 12.sp,
@@ -193,8 +194,15 @@ fun PlayScreen(vm: GameSession) {
                 else -> if (isHost) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (state.phase == Phase.EXPLORE) {
+                            OutlinedButton({ vm.scanOmens() }, enabled = !state.busy) { Text("📡 Omens") }
                             Button({ imageCapture?.let { vm.spawnFromCamera(it) } }, enabled = !state.busy && imageCapture != null, modifier = Modifier.weight(1f)) {
-                                Text(if (steps >= 30) "Spawn (+${minOf(steps / 4, 50)} HP from $steps steps)" else "Point at something · Spawn")
+                                Text(
+                                    when {
+                                        state.bossLair != null -> "👑 Spawn the BOSS"
+                                        steps >= 30 -> "Spawn (+${minOf(steps / 4, 50)} HP from $steps steps)"
+                                        else -> "Point at something · Spawn"
+                                    }
+                                )
                             }
                         } else {
                             Button({ vm.nextEncounter() }, modifier = Modifier.weight(1f)) {

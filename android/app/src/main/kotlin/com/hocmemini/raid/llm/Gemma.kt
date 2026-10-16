@@ -22,6 +22,7 @@ import kotlinx.coroutines.withContext
 data class SpawnedMonster(val name: String, val hp: Int, val attacks: List<String>, val weakness: String, val flavor: String, val emoji: String)
 data class Resolved(val damageToMonster: Int, val damageToPlayer: Int, val narration: String)
 data class Loot(val name: String, val effect: String)
+data class OmenText(val name: String, val lore: String, val threat: Int)
 
 /**
  * The tools Gemma 4 calls. LiteRT-LM runs them automatically mid-generation; they just stash
@@ -31,6 +32,7 @@ class GameTools : ToolSet {
     @Volatile var spawned: SpawnedMonster? = null
     @Volatile var resolved: Resolved? = null
     @Volatile var loot: Loot? = null
+    @Volatile var omens: List<OmenText>? = null
 
     @Tool(description = "Turn the real-world object or scene in the photo into the monster the players must fight. Call exactly once.")
     fun spawn_monster(
@@ -52,6 +54,17 @@ class GameTools : ToolSet {
         @ToolParam(description = "One or two punchy sentences narrating the exchange in second person") narration: String,
     ): Map<String, Any> {
         resolved = Resolved(damageToMonster.coerceIn(0, 30), damageToPlayer.coerceIn(0, 12), narration)
+        return mapOf("ok" to true)
+    }
+
+    @Tool(description = "Turn the list of nearby wireless signal names into dungeon lore. Call exactly once, with one entry per signal, same order.")
+    fun write_omens(
+        @ToolParam(description = "A spooky or funny entity name for each signal, same order as given") names: List<String>,
+        @ToolParam(description = "One short sentence of lore for each signal, same order") lores: List<String>,
+        @ToolParam(description = "Threat level 1 to 5 for each signal, same order; 5 only for something that sounds powerful or ominous") threats: List<Int>,
+    ): Map<String, Any> {
+        val n = minOf(names.size, lores.size, threats.size)
+        omens = (0 until n).map { OmenText(names[it].take(40), lores[it].take(140), threats[it].coerceIn(1, 5)) }
         return mapOf("ok" to true)
     }
 
@@ -123,13 +136,14 @@ class Gemma(private val modelPath: String, private val useGpu: Boolean) {
     }
 
     /** Photo of a real object -> monster via the spawn_monster tool. Starts a fresh conversation. */
-    suspend fun spawn(imagePath: String, stepsWalked: Int, environment: String): Pair<SpawnedMonster?, String> = withContext(Dispatchers.IO) {
+    suspend fun spawn(imagePath: String, stepsWalked: Int, environment: String, bossLair: String?): Pair<SpawnedMonster?, String> = withContext(Dispatchers.IO) {
         tools.spawned = null
         newConversation()
         val prompt = buildString {
             append(SPAWN_PROMPT)
             if (stepsWalked > 30) append(" The players walked $stepsWalked steps to find it, so make it bigger and nastier than usual.")
             if (environment.isNotBlank()) append(" Conditions: $environment. Let that shape the monster.")
+            if (bossLair != null) append(" IMPORTANT: this place is the lair of $bossLair. The monster is its champion or the entity itself: make it a BOSS, hp 60 to 80, more menacing than usual.")
         }
         val t0 = System.currentTimeMillis()
         var reply = send(Contents.of(Content.ImageFile(imagePath), Content.Text(prompt)))
@@ -178,6 +192,20 @@ class Gemma(private val modelPath: String, private val useGpu: Boolean) {
         }
         Log.i(TAG, "resolve took ${System.currentTimeMillis() - t0} ms; tool=${tools.resolved != null}; audio=${audioWav != null}")
         tools.resolved to reply.plainText()
+    }
+
+    /** Nearby signal names -> lore via write_omens. Uses a throwaway conversation so it doesn't pollute a battle. */
+    suspend fun omens(signals: List<String>): Pair<List<OmenText>?, String> = withContext(Dispatchers.IO) {
+        tools.omens = null
+        val keep = conversation; conversation = null
+        val c = newConversation()
+        val t0 = System.currentTimeMillis()
+        val list = signals.mapIndexed { i, n -> "${i + 1}. \"$n\"" }.joinToString("\n")
+        var reply = c.sendMessage(Contents.of("The players sense ${signals.size} wireless signals nearby — Wi-Fi networks and Bluetooth devices — in this order:\n$list\nTreat each name as the name of a spirit, faction or creature haunting this place. Call write_omens once with lists for all ${signals.size}, then say one short ominous line."))
+        if (tools.omens == null) reply = c.sendMessage(Contents.of("Call the write_omens tool now with all ${signals.size} entries."))
+        Log.i(TAG, "omens took ${System.currentTimeMillis() - t0} ms; tool=${tools.omens != null}")
+        c.close(); conversation = keep
+        tools.omens to reply.plainText()
     }
 
     /** After a kill: ask for an item salvaged from the object. */

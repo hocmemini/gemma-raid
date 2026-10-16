@@ -35,6 +35,10 @@ data class Player(
     val items: List<String> = emptyList(),
 )
 
+/** A nearby Wi-Fi/Bluetooth signal that Gemma turned into lore. */
+@Serializable
+data class Omen(val signal: String, val name: String, val lore: String, val threat: Int, val dbm: Int)
+
 @Serializable
 data class GameState(
     val phase: Phase = Phase.LOBBY,
@@ -51,6 +55,9 @@ data class GameState(
     val env: String = "",
     /** Players with a parry armed (double twist). */
     val parries: List<String> = emptyList(),
+    val omens: List<Omen> = emptyList(),
+    /** Set when the strongest omen is menacing enough: the next spawn is its boss. */
+    val bossLair: Omen? = null,
 ) {
     fun withLog(line: String): GameState = copy(log = (log + line).takeLast(40))
 }
