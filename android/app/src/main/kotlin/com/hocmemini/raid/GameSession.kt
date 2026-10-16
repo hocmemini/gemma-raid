@@ -164,7 +164,26 @@ class GameSession(private val app: Application) {
     private fun saveCharacter(p: Player) { prefs.edit().putString("character", json.encodeToString(Player.serializer(), p)).apply() }
     fun resetCharacter() { prefs.edit().remove("character").apply() }
 
+    /** Sprites and captures pile up in the cache (lurkers shoot every 15 s): keep the last hour, keep what's referenced. */
+    private fun sweepCache() = scope.launch(Dispatchers.IO) {
+        runCatching {
+            val keep = buildSet {
+                state.value.monster?.sprite?.let { add(it) }
+                state.value.players.values.flatMap { it.companions }.forEach { add(it.sprite) }
+                lurkers.value.forEach { add(it.sprite) }
+                savedCharacter()?.companions?.forEach { add(it.sprite) }
+            }
+            val cutoff = System.currentTimeMillis() - 60 * 60 * 1000
+            var n = 0
+            app.cacheDir.listFiles()?.forEach { f ->
+                if ((f.name.startsWith("sprite-") || f.name.startsWith("capture-")) && f.name !in keep && f.lastModified() < cutoff) { if (f.delete()) n++ }
+            }
+            if (n > 0) Log.i("Raid", "cache sweep removed $n files")
+        }
+    }
+
     init {
+        sweepCache()
         // A stray download of a model we already have (earlier builds allowed it) is just wasted data.
         runCatching { if (models.has("E2B") || models.has("E4B")) { val n = models.cancelDownloads(); if (n > 0) gemmaStatus.value = "cancelled $n stray download(s)" } }
         textScale.value = prefs.getFloat("textScale", 1f)
@@ -766,6 +785,7 @@ class GameSession(private val app: Application) {
             val hp = (spawned.hp + bonus) * (if (lair != null) 3 else 2) / 2
             val spriteName = spriteJob.await()?.name ?: ""
             if (spriteName.isNotBlank()) spriteVersion.value++
+            File(path).delete()
             val m = Monster(if (lair != null) "👑 ${spawned.name}" else spawned.name, hp, hp, spawned.attacks, spawned.weakness, spawned.flavor, bearing, loc?.latitude ?: 0.0, loc?.longitude ?: 0.0, loc?.accuracy ?: 999f, spawned.emoji, spawned.accessories, spriteName)
             steps.reset(); fightStartedAt = System.currentTimeMillis()
             journalMark("${m.emoji} ${m.name}")
@@ -1190,6 +1210,7 @@ class GameSession(private val app: Application) {
         windupJob?.cancel()
         steps.reset()
         ambushAtSteps = -1
+        sweepCache()
         state.update { s -> s.copy(phase = Phase.EXPLORE, monster = null, steps = 0, fx = null, windup = 0, victory = null, ambush = false, players = s.players.mapValues { (_, p) -> p.copy(hp = maxOf(p.hp, p.maxHp / 2), potions = maxOf(p.potions, 1)) }).withLog("The party regroups. Walk around, then point at something new.") }
         onPhaseChanged(Phase.EXPLORE); broadcast()
     }

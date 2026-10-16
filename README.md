@@ -81,6 +81,11 @@ reconnects keeps their HP, XP and items. Logs: tag `NearbyLink`.
 - [x] escape rolls, merchant haggling with real prices, inventory, Brain screen with model download
 - [ ] optional online mode: `gemma-4-26b-a4b-it` via Gemini API for richer narration
 
+## Since submission (same day, still going)
+Quests board driven by real events · monster voices and NPC personas · the DM names your dungeon · chiptune
+battle/explore loops, heartbeat under 30% HP · crit screen shake, danger vignette, confetti · host↔client pings with
+latency chips · cache sweeping. Every commit after 15:35 MDT is polish on the submitted design.
+
 ## License
 
 Apache-2.0. Gemma 4 weights are Apache-2.0 too.

@@ -137,7 +137,7 @@ class GameTools : ToolSet {
         @ToolParam(description = "Two or three single emoji to draw onto the real object as its features, separated by spaces, e.g. 👀 🗡️ 🔥") accessories: String,
         @ToolParam(description = "One short line the monster shouts at the players as it appears, ALL CAPS, under 8 words") taunt: String,
     ): Map<String, Any> {
-        spawned = SpawnedMonster(name.clean(), hp.coerceIn(10, 80), splitList(attacks.clean()), weakness.clean(), flavor.clean(), emoji.clean().take(4).ifBlank { "👾" }, splitEmoji(accessories.clean()), taunt.clean().take(60))
+        spawned = runCatching { SpawnedMonster(name.clean(), hp.coerceIn(10, 80), splitList(attacks.clean()), weakness.clean(), flavor.clean(), emoji.clean().take(4).ifBlank { "👾" }, splitEmoji(accessories.clean()), taunt.clean().take(60)) }.getOrNull()
         Log.i("Gemma", "spawn_monster $name hp=$hp weak=$weakness attacks=$attacks | $flavor")
         return mapOf("ok" to true)
     }
