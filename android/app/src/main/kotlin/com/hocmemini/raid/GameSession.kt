@@ -332,12 +332,12 @@ class GameSession(private val app: Application) {
             // Exploring pays: every 4 steps walked since the last fight adds 1 HP (cap +50).
             val bonus = min(walked / 4, 50)
             val hp = (spawned.hp + bonus) * (if (lair != null) 3 else 2) / 2
-            val m = Monster(if (lair != null) "👑 ${spawned.name}" else spawned.name, hp, hp, spawned.attacks, spawned.weakness, spawned.flavor, bearing, loc?.latitude ?: 0.0, loc?.longitude ?: 0.0, spawned.emoji)
+            val m = Monster(if (lair != null) "👑 ${spawned.name}" else spawned.name, hp, hp, spawned.attacks, spawned.weakness, spawned.flavor, bearing, loc?.latitude ?: 0.0, loc?.longitude ?: 0.0, spawned.emoji, spawned.accessories)
             steps.reset()
             fightStartedAt = System.currentTimeMillis()
             statsStore.update { it.copy(spawns = it.spawns + 1, spawnMs = it.spawnMs + (System.currentTimeMillis() - t0), stepsWalked = it.stepsWalked + walked, toolRetries = g.retries) }
             state.update {
-                var s = it.copy(phase = Phase.BATTLE, monster = m, busy = false, turn = 0, steps = 0, env = env.summary.value, parries = emptyList(), bossLair = null, fx = Fx(nextSeq(it), label = "spawn"))
+                var s = it.copy(phase = Phase.BATTLE, monster = m, busy = false, turn = 0, steps = 0, env = env.summary.value, parries = emptyList(), bossLair = null, fx = Fx(nextSeq(it), label = "spawn", taunt = spawned.taunt))
                     .withLog("${m.emoji} ${m.name} appears! ${m.flavor}")
                 if (lair != null) s = s.withLog("👑 BOSS FIGHT — champion of ${lair.name}. Double XP.")
                 if (conditions.isNotBlank()) s = s.withLog("(${conditions.replaceFirstChar { c -> c.uppercase() }}.)")
@@ -460,7 +460,7 @@ class GameSession(private val app: Application) {
             var next = s.copy(
                 busy = false, turn = s.turn + 1, monster = m.copy(hp = newMonsterHp), parries = s.parries - playerId,
                 fx = Fx(nextSeq(s), playerId, dealt = dmg, taken = hurt, crit = crit, parried = parried && r.damageToPlayer > 0, killed = killed,
-                    label = if (r.style >= 5) "LEGENDARY!" else if (r.style == 4) "stylish" else ""),
+                    label = if (r.style >= 5) "LEGENDARY!" else if (r.style == 4) "stylish" else "", taunt = if (killed) "" else r.taunt),
             ).withLog(r.narration).withLog(tag)
             if (wind) next = next.withLog("💫 ${me.name} refuses to fall — second wind! Back up with ${SECOND_WIND_HP} HP.")
             if (newLevel > me.level) {

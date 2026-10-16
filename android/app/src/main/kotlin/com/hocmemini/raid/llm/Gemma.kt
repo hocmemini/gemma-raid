@@ -19,8 +19,8 @@ import com.google.ai.edge.litertlm.tool
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-data class SpawnedMonster(val name: String, val hp: Int, val attacks: List<String>, val weakness: String, val flavor: String, val emoji: String)
-data class Resolved(val damageToMonster: Int, val damageToPlayer: Int, val narration: String, val style: Int)
+data class SpawnedMonster(val name: String, val hp: Int, val attacks: List<String>, val weakness: String, val flavor: String, val emoji: String, val accessories: List<String>, val taunt: String)
+data class Resolved(val damageToMonster: Int, val damageToPlayer: Int, val narration: String, val style: Int, val taunt: String)
 data class Loot(val name: String, val effect: String)
 data class OmenText(val name: String, val lore: String, val threat: Int)
 
@@ -42,8 +42,11 @@ class GameTools : ToolSet {
         @ToolParam(description = "One short phrase for what it is weak against, something players could plausibly do or find nearby") weakness: String,
         @ToolParam(description = "One or two vivid sentences introducing the monster to the players") flavor: String,
         @ToolParam(description = "One single emoji that best represents this monster") emoji: String,
+        @ToolParam(description = "Two or three single emoji to draw onto the real object as its features: eyes, horns, a weapon, an aura. Example: 👀, 🗡️, 🔥") accessories: List<String>,
+        @ToolParam(description = "One short line the monster shouts at the players as it appears, ALL CAPS, under 8 words") taunt: String,
     ): Map<String, Any> {
-        spawned = SpawnedMonster(name, hp.coerceIn(10, 80), attacks, weakness, flavor, emoji.take(4).ifBlank { "👾" })
+        spawned = SpawnedMonster(name, hp.coerceIn(10, 80), attacks, weakness, flavor, emoji.take(4).ifBlank { "👾" },
+            accessories.map { it.trim().take(4) }.filter { it.isNotBlank() }.take(3), taunt.take(60))
         Log.i("Gemma", "spawn_monster $name hp=$hp weak=$weakness attacks=$attacks | $flavor")
         return mapOf("ok" to true)
     }
@@ -54,8 +57,9 @@ class GameTools : ToolSet {
         @ToolParam(description = "Damage the monster deals back to this player, 0 to 8") damageToPlayer: Int,
         @ToolParam(description = "One or two punchy sentences narrating the exchange in second person. Describe the blow and its effect; never say the monster or player is dead or defeated.") narration: String,
         @ToolParam(description = "How creative, funny or specific the action was: 1 boring or repeated, 3 decent, 5 legendary. Absurd ideas that fit the object score high.") style: Int,
+        @ToolParam(description = "One short line the monster shouts back at the player, ALL CAPS, under 8 words, e.g. TAKE THAT, INTREPID FOOL") taunt: String,
     ): Map<String, Any> {
-        resolved = Resolved(damageToMonster.coerceIn(0, 30), damageToPlayer.coerceIn(0, 12), narration, style.coerceIn(1, 5))
+        resolved = Resolved(damageToMonster.coerceIn(0, 30), damageToPlayer.coerceIn(0, 12), narration, style.coerceIn(1, 5), taunt.take(60))
         Log.i("Gemma", "resolve_action dmg=$damageToMonster hurt=$damageToPlayer style=$style | $narration")
         return mapOf("ok" to true)
     }
@@ -240,6 +244,6 @@ Always use the provided tools to report game effects; never invent numbers in pr
 Reward wit: an absurd, specific, funny action that fits the object (a TSA liquid check on a bag, a firmware update on a printer) is a legendary blow — top damage and style 5. Vague or repeated actions do little.
 Never declare the monster or a player dead, defeated or victorious; the game engine decides and announces that. Describe the blow and its effect only."""
         const val SPAWN_PROMPT = """Look at this photo. Pick the most prominent object or feature and turn it into a monster.
-Call spawn_monster with a name, hp, attacks, a weakness, flavor text and an emoji, then say one short line to the players."""
+Call spawn_monster with a name, hp, attacks, a weakness, flavor text, an emoji, 2-3 emoji features to draw on the object, and a taunt; then say one short line to the players."""
     }
 }

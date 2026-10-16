@@ -19,6 +19,8 @@ data class Monster(
     val lat: Double,
     val lon: Double,
     val emoji: String = "👾",
+    /** Emoji features Gemma pins onto the real object: eyes, horns, a weapon, an aura. */
+    val accessories: List<String> = emptyList(),
 )
 
 @Serializable
@@ -49,6 +51,8 @@ data class Fx(
     val parried: Boolean = false,
     val killed: Boolean = false,
     val label: String = "",
+    /** What the monster shouts, shown in a speech bubble. */
+    val taunt: String = "",
 )
 
 /** A nearby Wi-Fi/Bluetooth signal that Gemma turned into lore. */
