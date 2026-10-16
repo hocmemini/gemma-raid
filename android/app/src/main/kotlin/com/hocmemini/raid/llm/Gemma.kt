@@ -58,6 +58,14 @@ class GameTools : ToolSet {
     @Volatile var trade: Trade? = null
     @Volatile var gift: Trade? = null
     @Volatile var heal: Int = 0
+    @Volatile var forge: Triple<String, String, Int>? = null
+
+    @Tool(description = "A smith NPC reforges one of the player's carried items for XP: it keeps its name, gains a ⚒ mark and a stronger effect. Call when the player asks to upgrade, reforge or improve an item they carry.")
+    fun forge_item(
+        @ToolParam(description = "The carried item's name, exactly as listed") name: String,
+        @ToolParam(description = "Its new, stronger effect in one short sentence") new_effect: String,
+        @ToolParam(description = "Price in XP, 30 to 120") price_xp: Int,
+    ): Map<String, Any> { forge = Triple(name.clean().take(40), new_effect.clean().take(120), price_xp.coerceIn(20, 200)); return mapOf("ok" to true) }
     @Volatile var power: Pair<String, String>? = null
     @Volatile var epithet: String? = null
 
@@ -75,7 +83,7 @@ class GameTools : ToolSet {
     @Tool(description = "Turn the real-world object in the photo into a FRIENDLY non-player character the players can talk to. Call exactly once.")
     fun spawn_npc(
         @ToolParam(description = "Character name derived from the object, e.g. 'Brenda the Stapler-Smith'") name: String,
-        @ToolParam(description = "One of: merchant, sage, healer, oddball") role: String,
+        @ToolParam(description = "One of: merchant, sage, healer, smith, oddball") role: String,
         @ToolParam(description = "One single emoji for the character") emoji: String,
         @ToolParam(description = "Two or three single emoji features to draw on the object, separated by spaces, e.g. 👀 🎩") accessories: String,
         @ToolParam(description = "What they say as the players walk up, under 15 words") greeting: String,
@@ -379,9 +387,9 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
     suspend fun meet(imagePath: String, environment: String): Pair<SpawnedNpc?, String> = lock.withLock { withContext(Dispatchers.IO) {
         tools.npc = null
         val prompt = buildString {
-            append("Look at this photo. Turn the most prominent object into a friendly character the players can talk to: a merchant selling odd wares for XP, a sage with lore and tips, a healer, or an oddball. ")
+            append("Look at this photo. Turn the most prominent object into a friendly character the players can talk to: a merchant selling odd wares for XP, a sage with lore and tips, a healer, a smith who reforges items, or an oddball. ")
             if (environment.isNotBlank()) append("Conditions: $environment. ")
-            append("Answer as JSON: name, role (merchant|sage|healer|oddball), emoji (one), accessories (2-3 emoji separated by spaces), greeting (under 15 words), offer (one short line of what they offer).")
+            append("Answer as JSON: name, role (merchant|sage|healer|smith|oddball), emoji (one), accessories (2-3 emoji separated by spaces), greeting (under 15 words), offer (one short line of what they offer).")
         }
         val t0 = System.currentTimeMillis()
         newConversation()
@@ -410,6 +418,7 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
             "merchant" -> "greedy and flattering; everything is a sales pitch, you count coins out loud, you never give anything away"
             "sage" -> "cryptic and ancient; you speak in riddles but always hide one genuinely useful tip about monsters' weaknesses in your words"
             "healer" -> "warm and fussy; you scold about wounds, you heal when asked, you remember everyone's name"
+            "smith" -> "gruff and proud; you reforge items the player carries with forge_item for XP, you insult flimsy gear and praise good steel"
             else -> "an oddball obsessed with one strange topic that you steer every answer back to"
         }
         return " You are now ${n.name}, the ${n.role}: ${n.offer}. You are $style. Stay in character, under 40 words."
@@ -435,16 +444,19 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
     } }
 
     /** Chat with the current NPC (continues the conversation started by meet). */
+    val lastForge: Triple<String, String, Int>? get() = tools.forge
+
     suspend fun npcChat(playerName: String, text: String?, audioWav: ByteArray?, npcName: String, role: String, xp: Int, items: List<String>): Pair<String, Triple<Trade?, Trade?, Int>> = lock.withLock { withContext(Dispatchers.IO) {
-        tools.trade = null; tools.gift = null; tools.heal = 0
+        tools.trade = null; tools.gift = null; tools.heal = 0; tools.forge = null
         val situation = buildString {
             append("You are now $npcName, the $role. Stay in character, under 40 words. $playerName has $xp XP and carries: ${items.ifEmpty { listOf("nothing") }.joinToString(", ")}. ")
             if (role == "merchant") append("A merchant SELLS: when they ask to buy or what's for sale, call sell_item (its price is the real price; say that exact number; a good haggle earns discount_percent). Never call give_item as a merchant. ")
+            else if (role == "smith") append("A smith REFORGES: when they ask to upgrade or improve a carried item, call forge_item with that item's exact name, a stronger effect and a price; never call give_item. ")
             else append("Use give_item for a free gift at most once, heal_player to heal (healers only). ")
             if (audioWav != null) append("$playerName speaks in the attached audio.") else append("$playerName says: \"$text\"")
         }
         val reply = if (audioWav != null) send(Contents.of(Content.AudioBytes(audioWav), Content.Text(situation))) else send(Contents.of(situation))
-        if (tools.trade == null && tools.gift == null && tools.heal == 0 && reply.rawText().contains("call:")) LenientTools.recover(reply.rawText(), tools)
+        if (tools.trade == null && tools.gift == null && tools.heal == 0 && tools.forge == null && reply.rawText().contains("call:")) LenientTools.recover(reply.rawText(), tools)
         Log.i(TAG, "npcChat trade=${tools.trade} gift=${tools.gift} heal=${tools.heal} | ${reply.plainText().take(80)}")
         reply.plainText() to Triple(tools.trade, tools.gift, tools.heal)
     } }
@@ -573,6 +585,7 @@ object LenientTools {
             "sell_item" -> { t.sell_item(str("name"), str("effect"), int("price_xp", 50), int("discount_percent", 0)); true }
             "give_item" -> { t.give_item(str("name"), str("effect")); true }
             "heal_player" -> { t.heal_player(int("amount", 10)); true }
+            "forge_item" -> { t.forge_item(str("name"), str("new_effect"), int("price_xp", 50)); true }
             "use_power" -> { t.use_power(str("power"), str("argument")); true }
             "grant_epithet" -> { t.grant_epithet(str("title")); true }
             "drink_potion" -> { t.drink_potion(); true }

@@ -926,10 +926,25 @@ class GameSession(private val app: Application) {
         val (reply0, effects) = runCatching { g.npcChat(p.name, text, audioWav, npc.name, npc.role, p.xp, p.items.map { it.toString() }) }.getOrElse { "" to Triple(null, null, 0) }
         val reply = reply0.clean()
         val (trade, gift, heal) = effects
+        val forge = g.lastForge
         state.update { s ->
             var me = s.players[p.id] ?: p
             var next = s.copy(busy = false)
             var spent = 0; var item = ""; var healed = 0
+            if (forge != null) {
+                val (fname, feffect, fprice) = forge
+                val idx = me.items.indexOfFirst { it.name.equals(fname, true) || it.name.contains(fname, true) || fname.contains(it.name, true) }
+                if (idx < 0) next = next.withLog("⚒ ${npc.name} squints: ${me.name} carries no '$fname'.")
+                else if (me.xp < fprice) next = next.withLog("⚒ Reforging ${me.items[idx].name} costs $fprice XP — ${me.name} has ${me.xp}.")
+                else {
+                    val old = me.items[idx]
+                    val tier = old.name.count { it == '⚒' } + 1
+                    val upgraded = Item(old.name.replace(" ⚒", "").trim() + " " + "⚒".repeat(tier), feffect)
+                    me = me.copy(xp = me.xp - fprice, items = me.items.toMutableList().also { it[idx] = upgraded })
+                    spent = fprice; item = upgraded.name
+                    next = next.withLog("⚒ ${npc.name} reforges ${old.name} → ${upgraded.name} for $fprice XP: $feffect")
+                }
+            }
             if (trade != null) {
                 val tag = if (trade.discount > 0) " (${trade.discount}% off — well haggled)" else ""
                 if (me.xp >= trade.priceXp) { me = me.copy(xp = me.xp - trade.priceXp, items = (me.items + Item(trade.item, trade.effect)).takeLast(BAG_SLOTS)); spent = trade.priceXp; item = trade.item; next = next.withLog("💰 ${me.name} buys ${trade.item} for ${trade.priceXp} XP$tag: ${trade.effect}") }
@@ -1085,7 +1100,7 @@ class GameSession(private val app: Application) {
         val crit = r.style >= 4
         if (r.style >= 5) dmg *= 2 else if (r.style == 4) dmg = (dmg * 1.5f).roundToInt()
         val itemUsed = r.usedItem?.let { want -> p.items.firstOrNull { it.name.equals(want, true) || it.name.contains(want, true) || want.contains(it.name, true) }?.name }
-        if (itemUsed != null && dmg > 0) dmg = (dmg * 1.5f).roundToInt()
+        if (itemUsed != null && dmg > 0) { val tier = itemUsed.count { it == '⚒' }; dmg = (dmg * (1.5f + 0.5f * tier)).roundToInt() }
         val wantsPotion = r.drankPotion && p.potions > 0
         // companions pile on
         val companionHits = p.companions.map { it.attack }
@@ -1106,7 +1121,7 @@ class GameSession(private val app: Application) {
             if (flanking) append(" (flank!)")
             if (!facing) append(" (not facing it)")
             if (cry > 0) append(" (battle cry +$cry)")
-            if (itemUsed != null) append(" (🎁 $itemUsed ×1.5)")
+            if (itemUsed != null) append(" (🎁 $itemUsed ×${1.5f + 0.5f * itemUsed.count { it == '⚒' }})")
             if (companionDmg > 0) append(" (🐾 +$companionDmg)")
             if (parried && r.damageToPlayer > 0) append(", 🛡 parried ${r.damageToPlayer}")
             else if (hurt > 0) append(", −$hurt ${p.name}")

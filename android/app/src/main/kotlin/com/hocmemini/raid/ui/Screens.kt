@@ -429,7 +429,8 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit, onMo
             val canTalk = state.phase == Phase.BATTLE || state.phase == Phase.EXPLORE || state.phase == Phase.NPC
             if (canTalk) {
                 val chips = when (state.phase) {
-                    Phase.NPC -> listOf("What's for sale?", "Heal me", "Tell me a secret", "Anything for free?")
+                    Phase.NPC -> if (monster?.role == "smith") listOf("Reforge my best item", "What can you improve?", "Tell me a secret") + (self?.items?.take(2)?.map { "Reforge ${it.name}" } ?: emptyList())
+                                 else listOf("What's for sale?", "Heal me", "Tell me a secret", "Anything for free?")
                     Phase.EXPLORE -> listOf("Any tips?", "What is this place?", "Who are you?")
                     else -> (if (isHost) listOf("🏃 Run!") else emptyList()) + powersFor(self?.level ?: 1).map { when (it) { "Recast" -> "I Recast its weakness to…"; "Parley" -> "I Parley: hear me out!"; "Bind" -> "I Bind it!"; else -> "I Taunt it: come at me!" } }
                 }
