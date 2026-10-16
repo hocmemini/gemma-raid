@@ -66,7 +66,10 @@ fun StatsScreen(vm: GameSession, onBack: () -> Unit) {
                 }
             }
         }
-        TextButton({ vm.statsStore.reset() }) { Text("Reset stats") }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton({ vm.statsStore.reset() }) { Text("Reset stats") }
+            TextButton({ vm.resetCharacter() }) { Text("Reset character") }
+        }
     }
 }
 

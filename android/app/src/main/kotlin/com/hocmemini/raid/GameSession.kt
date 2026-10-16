@@ -110,6 +110,15 @@ class GameSession(private val app: Application) {
 
     val modelFile: File get() = File(app.filesDir, MODEL_NAME)
     val modelPresent = MutableStateFlow(modelFile.exists())
+    private val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true; encodeDefaults = true }
+
+    /** Your character (xp, level, items, potions, epithet, companions) survives between raids. */
+    private fun savedCharacter(): Player? = runCatching { prefs.getString("character", null)?.let { json.decodeFromString(Player.serializer(), it) } }.getOrNull()
+    private fun saveCharacter(p: Player) { prefs.edit().putString("character", json.encodeToString(Player.serializer(), p)).apply() }
+    fun resetCharacter() { prefs.edit().remove("character").apply() }
+    fun characterSummary(): String? = savedCharacter()?.let { c ->
+        "Your character: L${c.level}${if (c.epithet.isNotBlank()) " ${c.epithet}" else ""} · ${c.xp} xp · ${c.items.size} items · ${c.companions.size} companions · powers: ${powersFor(c.level).ifEmpty { listOf("none yet") }.joinToString(", ")}"
+    }
 
     fun startSensors() { if (!sensorsRunning) { compass.start(); locator.start(); steps.start(); env.start(); swing.start(); twist.start(); sensorsRunning = true } }
     fun stopSensors() { if (sensorsRunning) { compass.stop(); locator.stop(); steps.stop(); env.stop(); swing.stop(); twist.stop(); sensorsRunning = false } }
@@ -199,7 +208,12 @@ class GameSession(private val app: Application) {
 
     private fun selfPlayer(): Player {
         val loc = locator.location.value
-        return Player(selfId, selfName, headingDeg = compass.heading.value, lat = loc?.latitude ?: 0.0, lon = loc?.longitude ?: 0.0, acc = loc?.accuracy ?: 999f)
+        val saved = savedCharacter()
+        val fresh = Player(selfId, selfName, headingDeg = compass.heading.value, lat = loc?.latitude ?: 0.0, lon = loc?.longitude ?: 0.0, acc = loc?.accuracy ?: 999f)
+        return if (saved == null) fresh else fresh.copy(
+            xp = saved.xp, level = saved.level, maxHp = maxHpFor(saved.level), hp = maxHpFor(saved.level),
+            items = saved.items, potions = maxOf(saved.potions, 1), epithet = saved.epithet, companions = saved.companions,
+        )
     }
 
     fun sendPose() {
@@ -228,6 +242,7 @@ class GameSession(private val app: Application) {
                 val before = state.value
                 state.value = msg.state
                 trackFx(msg.state)
+                msg.state.players[selfId]?.let { saveCharacter(it) }
                 val hpBefore = before.players[selfId]?.hp; val hpAfter = msg.state.players[selfId]?.hp
                 if (hpBefore != null && hpAfter != null && hpAfter < hpBefore) buzz(120)
                 if (msg.state.phase != before.phase) onPhaseChanged(msg.state.phase)
@@ -253,7 +268,7 @@ class GameSession(private val app: Application) {
         scope.launch { submit(h.playerId, null, bytes, h.headingDeg, h.lat, h.lon) }
     }
 
-    private fun broadcast() { trackFx(state.value); link?.send(Msg.State(state.value)) }
+    private fun broadcast() { trackFx(state.value); state.value.players[selfId]?.let { saveCharacter(it) }; link?.send(Msg.State(state.value)) }
 
     private fun onPhaseChanged(phase: Phase) {
         when (phase) {

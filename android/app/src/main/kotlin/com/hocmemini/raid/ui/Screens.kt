@@ -124,6 +124,7 @@ fun LobbyScreen(vm: GameSession, onStats: () -> Unit) {
     ) {
         Text("RAID", fontSize = 40.sp, fontWeight = FontWeight.Black)
         Text("Real objects become monsters. Fight them together. No internet, no server: Gemma 4 runs on the host's phone.")
+        vm.characterSummary()?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = Color(0xFFFFD54F)) }
         OutlinedTextField(name, { name = it }, label = { Text("Your name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
 
         Card {
