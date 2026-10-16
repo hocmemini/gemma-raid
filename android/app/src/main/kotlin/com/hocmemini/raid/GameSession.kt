@@ -10,42 +10,48 @@ import com.hocmemini.raid.audio.Recorder
 import com.hocmemini.raid.audio.Sfx
 import com.hocmemini.raid.camera.SpriteMaker
 import com.hocmemini.raid.camera.captureToFile
+import com.hocmemini.raid.game.Ally
+import com.hocmemini.raid.game.Encounter
 import com.hocmemini.raid.game.Fx
 import com.hocmemini.raid.game.GameState
 import com.hocmemini.raid.game.Monster
 import com.hocmemini.raid.game.Msg
+import com.hocmemini.raid.game.Omen
 import com.hocmemini.raid.game.Phase
 import com.hocmemini.raid.game.Player
-import com.hocmemini.raid.game.Encounter
 import com.hocmemini.raid.game.StatsStore
+import com.hocmemini.raid.game.companionCapacity
 import com.hocmemini.raid.game.headingDelta
 import com.hocmemini.raid.game.levelFor
 import com.hocmemini.raid.game.maxHpFor
+import com.hocmemini.raid.game.powerUnlockedAt
+import com.hocmemini.raid.game.powersFor
 import com.hocmemini.raid.llm.Gemma
-import com.hocmemini.raid.game.Omen
 import com.hocmemini.raid.net.NearbyLink
 import com.hocmemini.raid.net.SignalScanner
 import com.hocmemini.raid.sensors.Compass
 import com.hocmemini.raid.sensors.DoubleTwist
 import com.hocmemini.raid.sensors.Environment
-import com.hocmemini.raid.sensors.SwingDetector
-import com.hocmemini.raid.sensors.wavLoudness
 import com.hocmemini.raid.sensors.Locator
 import com.hocmemini.raid.sensors.StepCounter
+import com.hocmemini.raid.sensors.SwingDetector
 import com.hocmemini.raid.sensors.distanceMeters
+import com.hocmemini.raid.sensors.wavLoudness
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import java.io.File
 import java.util.UUID
 import kotlin.math.abs
 import kotlin.math.atan2
-import kotlin.math.cos
 import kotlin.math.ceil
+import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sin
@@ -53,6 +59,7 @@ import kotlin.math.sin
 /**
  * All game logic. Lives for the whole process (owned by [RaidApplication]), not a ViewModel,
  * so switching apps mid-battle doesn't unload the 2.6 GB model or drop the party.
+ * Only the host runs Gemma; clients send intents and receive state.
  */
 class GameSession(private val app: Application) {
     enum class Role { NONE, HOST, CLIENT }
@@ -68,6 +75,8 @@ class GameSession(private val app: Application) {
     val state = MutableStateFlow(GameState())
     val peers = MutableStateFlow<List<String>>(emptyList())
     val recording = MutableStateFlow(false)
+    val debugHud = MutableStateFlow(false)
+    val narrateAloud = MutableStateFlow(false)
     val savedName: String get() = prefs.getString("name", "") ?: ""
 
     val selfId: String = UUID.randomUUID().toString().take(8)
@@ -78,28 +87,26 @@ class GameSession(private val app: Application) {
     val steps = StepCounter(app)
     val env = Environment(app)
     val lastSwing = MutableStateFlow(0f)
-    val lastEvent = MutableStateFlow("")
     private val swing = SwingDetector(app) { peak -> onSwing(peak) }
     private val twist = DoubleTwist(app) { onTwist() }
     private var link: NearbyLink? = null
     private var gemma: Gemma? = null
     private val recorder = Recorder()
     val sfx = Sfx(app)
-    val narrateAloud = MutableStateFlow(false)
     private val scanner = SignalScanner(app)
     val statsStore = StatsStore(app)
+    private val vibrator = runCatching { app.getSystemService(VibratorManager::class.java)?.defaultVibrator }.getOrNull()
+
+    private val pendingAudio = mutableMapOf<String, Msg.AudioHeader>()
+    private var pendingSprite: Msg.SpriteHeader? = null
+    val spriteVersion = MutableStateFlow(0)
+    private var sensorsRunning = false
     private var raidStartedAt = 0L
     private var fightStartedAt = 0L
     private var lastFxSeq = 0
-    private var lastStepsSeen = 0
-    private val vibrator = runCatching { app.getSystemService(VibratorManager::class.java)?.defaultVibrator }.getOrNull()
-    /** Host: audio headers waiting for their STREAM payload, by endpoint. */
-    private val pendingAudio = mutableMapOf<String, Msg.AudioHeader>()
-    /** Client: sprite header waiting for its STREAM payload. */
-    private var pendingSprite: Msg.SpriteHeader? = null
-    /** Bumped whenever a sprite file lands so the overlay reloads it. */
-    val spriteVersion = MutableStateFlow(0)
-    private var sensorsRunning = false
+    private var windupJob: Job? = null
+    /** Host: the last slain monster, bindable as a companion. */
+    private var lastSlain: Monster? = null
 
     val modelFile: File get() = File(app.filesDir, MODEL_NAME)
     val modelPresent = MutableStateFlow(modelFile.exists())
@@ -123,14 +130,12 @@ class GameSession(private val app: Application) {
         }
     }
 
-    /** Copy a user-picked .litertlm (e.g. downloaded in Chrome) into app storage. */
     fun importModel(uri: Uri) = scope.launch(Dispatchers.IO) {
         runCatching {
             val tmp = File(modelFile.path + ".part")
             app.contentResolver.openInputStream(uri)!!.use { input ->
                 tmp.outputStream().use { out ->
-                    val buf = ByteArray(1 shl 20)
-                    var total = 0L
+                    val buf = ByteArray(1 shl 20); var total = 0L
                     while (true) {
                         val n = input.read(buf); if (n < 0) break
                         out.write(buf, 0, n); total += n
@@ -138,74 +143,24 @@ class GameSession(private val app: Application) {
                     }
                 }
             }
-            tmp.renameTo(modelFile)
-            modelPresent.value = true
+            tmp.renameTo(modelFile); modelPresent.value = true
             gemmaStatus.value = "model copied (${modelFile.length() shr 20} MB)"
         }.onFailure { gemmaStatus.value = "copy failed: ${it.message}" }
     }
 
-    // ---------- networking ----------
+    // ---------- lobby / networking ----------
 
     fun host(name: String) {
         selfName = name.ifBlank { "Host" }
         prefs.edit().putString("name", selfName).apply()
         role.value = Role.HOST
         link = NearbyLink(app, selfName, ::onMessage, ::onBinary, { peers.value = it }, { status.value = it }).also { it.host() }
-        steps.reset(); env.markBaseline(); lastStepsSeen = 0
+        steps.reset(); env.markBaseline()
         raidStartedAt = System.currentTimeMillis()
         statsStore.update { it.copy(raids = it.raids + 1) }
         state.update { it.copy(phase = Phase.EXPLORE, players = it.players + (selfId to selfPlayer())).withLog("$selfName opened the raid. Walk around, then point at something.") }
         broadcast()
-    }
-
-    /** A vigorous swing = a melee attack without typing. Harder swings hit harder. */
-    private fun onSwing(peak: Float) {
-        val s = state.value
-        if (s.phase != Phase.BATTLE || s.busy || (s.players[selfId]?.hp ?: 0) <= 0) return
-        lastSwing.value = peak
-        statsStore.update { it.copy(swings = it.swings + 1) }
-        buzz(30)
-        val text = when {
-            peak > 30f -> "I swing with everything I have, a wild all-out strike!"
-            peak > 22f -> "I swing hard at it!"
-            else -> "I take a swing at it."
-        }
-        act(text)
-    }
-
-    /** Double twist = parry: the monster's next hit on this player is blocked. */
-    private fun onTwist() {
-        val s = state.value
-        if (s.phase != Phase.BATTLE) return
-        buzz(20, 40, 20)
-        if (role.value == Role.HOST) armParry(selfId) else link?.send(Msg.Parry(selfId))
-    }
-
-    fun drinkPotion() {
-        if (state.value.phase != Phase.BATTLE) return
-        if (role.value == Role.HOST) applyPotion(selfId) else link?.send(Msg.Potion(selfId))
-    }
-
-    private fun applyPotion(playerId: String) {
-        state.update { s ->
-            val p = s.players[playerId] ?: return@update s
-            if (p.potions <= 0 || p.hp >= p.maxHp) return@update s
-            val healed = min(POTION_HEAL, p.maxHp - p.hp)
-            s.copy(players = s.players + (p.id to p.copy(hp = p.hp + healed, potions = p.potions - 1)), fx = Fx(nextSeq(s), p.id, label = "🧪 +$healed"))
-                .withLog("🧪 ${p.name} drinks a potion: +$healed HP (${p.potions - 1} left)")
-        }
-        if (playerId == selfId) buzz(30, 30, 30)
-        broadcast()
-    }
-
-    private fun nextSeq(s: GameState) = (s.fx?.seq ?: 0) + 1
-
-    private fun armParry(playerId: String) {
-        state.update { s ->
-            if (playerId in s.parries) s
-            else s.copy(parries = s.parries + playerId).withLog("🛡 ${s.players[playerId]?.name ?: "?"} twists into a guard stance — next hit is parried")
-        }
-        broadcast()
+        sfx.loop("ambient_explore")
     }
 
     fun join(name: String) {
@@ -216,22 +171,22 @@ class GameSession(private val app: Application) {
         statsStore.update { it.copy(raids = it.raids + 1) }
         link = NearbyLink(
             app, selfName, ::onMessage, ::onBinary,
-            onPeersChanged = { ps -> peers.value = ps; if (ps.isNotEmpty()) link?.send(Msg.Join(selfPlayer())) },
+            onPeersChanged = { ps -> peers.value = ps; if (ps.isNotEmpty()) { link?.send(Msg.Join(selfPlayer())); sfx.play("join") } },
             onStatus = { status.value = it },
         ).also { it.join() }
     }
 
-    /** Back to the lobby. Keeps the model loaded; drops the party and the battle. */
     fun leave() {
         if (role.value == Role.NONE) return
         flushPlaytime()
         if (recording.value) recorder.stop()
         recording.value = false
+        windupJob?.cancel(); windupJob = null
         runCatching { link?.stop() }; link = null
-        peers.value = emptyList(); pendingAudio.clear()
-        role.value = Role.NONE
-        status.value = ""
+        peers.value = emptyList(); pendingAudio.clear(); pendingSprite = null
+        role.value = Role.NONE; status.value = ""
         state.value = GameState()
+        sfx.stopLoop()
     }
 
     private fun flushPlaytime() {
@@ -239,56 +194,6 @@ class GameSession(private val app: Application) {
             val secs = ((System.currentTimeMillis() - raidStartedAt) / 1000).toInt()
             statsStore.update { it.copy(playSeconds = it.playSeconds + secs) }
             raidStartedAt = 0
-        }
-    }
-
-    /** Both roles: derive stats from the synced Fx event stream so host and clients agree. */
-    private fun trackFx(s: GameState) {
-        val f = s.fx ?: return
-        if (f.seq == lastFxSeq) return
-        lastFxSeq = f.seq
-        playFx(f, s)
-        val mine = f.playerId == selfId
-        statsStore.update { st ->
-            var n = st
-            if (mine && f.dealt > 0) n = n.copy(damageDealt = n.damageDealt + f.dealt, bestHit = maxOf(n.bestHit, f.dealt))
-            if (mine && f.taken > 0) n = n.copy(damageTaken = n.damageTaken + f.taken)
-            if (mine && f.parried) n = n.copy(parries = n.parries + 1)
-            if (mine && f.label == "LEGENDARY!") n = n.copy(legendaryHits = n.legendaryHits + 1)
-            if (mine && f.label == "stylish") n = n.copy(stylishHits = n.stylishHits + 1)
-            if (mine && (f.label.startsWith("🧪") || f.potion > 0)) n = n.copy(potions = n.potions + 1)
-            if (f.killed) n = n.copy(kills = n.kills + 1, bosses = n.bosses + (if (s.monster?.name?.startsWith("👑") == true) 1 else 0), longestFightTurns = maxOf(n.longestFightTurns, s.turn))
-            if (f.label == "spawn") n = n.copy(encounters = n.encounters + 1)
-            n
-        }
-    }
-
-    /** Sound design for one exchange, timed to the animations in MonsterOverlay/FxLayer. */
-    private fun playFx(f: Fx, s: GameState) {
-        when {
-            f.label == "spawn" -> { sfx.play("spawn"); sfx.growl(f.taunt, 700) }
-            f.label == "omens" -> sfx.play("omen")
-            f.label == "chase" -> { sfx.play("spawn", volume = 0.6f, rate = 1.3f); sfx.growl(f.taunt, 300) }
-            else -> {
-                if (f.dealt > 0) { sfx.play("slash"); sfx.play("hit", 130) } else if (f.playerId.isNotBlank() && f.potion == 0) sfx.play("miss")
-                if (f.label == "LEGENDARY!") sfx.play("legendary", 200)
-                if (f.potion > 0) sfx.play("potion", 150)
-                if (f.parried) sfx.play("parry", 320)
-                else if (f.taken > 0) sfx.play("attack", 260)
-                if (f.killed) { sfx.play("kill", 350); sfx.play("victory", 1100) }
-                else if (f.taunt.isNotBlank()) sfx.growl(f.taunt, if (f.taken > 0) 900 else 500)
-                if (f.levelUp) sfx.play("levelup", 1300)
-                if (f.wind) sfx.play("wind", 600)
-                if (narrateAloud.value && !f.killed) s.log.dropLast(1).lastOrNull()?.let { sfx.narrate(it, 1400) }
-            }
-        }
-    }
-
-    private fun recordEncounter(s: GameState, outcome: String, loot: String = "") {
-        val m = s.monster ?: return
-        val secs = if (fightStartedAt > 0) ((System.currentTimeMillis() - fightStartedAt) / 1000).toInt() else 0
-        statsStore.update { st ->
-            st.copy(history = (st.history + Encounter(m.emoji, m.name, m.maxHp, outcome, s.turn, secs, loot, m.name.startsWith("👑"))).takeLast(30))
         }
     }
 
@@ -307,63 +212,197 @@ class GameSession(private val app: Application) {
         when (msg) {
             is Msg.Join -> if (role.value == Role.HOST) {
                 state.update { it.copy(players = it.players + (msg.player.id to msg.player)).withLog("${msg.player.name} joined the raid") }
-                broadcast()
+                sfx.play("join"); broadcast()
                 state.value.monster?.sprite?.takeIf { it.isNotBlank() }?.let { sendSprite(it, listOf(endpointId)) }
             }
-            is Msg.SpriteHeader -> if (role.value == Role.CLIENT) pendingSprite = msg
-            is Msg.Pose -> if (role.value == Role.HOST) {
-                state.update { s ->
-                    val p = s.players[msg.playerId] ?: return@update s
-                    s.copy(players = s.players + (p.id to p.copy(headingDeg = msg.headingDeg, lat = msg.lat, lon = msg.lon)))
-                }
+            is Msg.Pose -> if (role.value == Role.HOST) state.update { s ->
+                val p = s.players[msg.playerId] ?: return@update s
+                s.copy(players = s.players + (p.id to p.copy(headingDeg = msg.headingDeg, lat = msg.lat, lon = msg.lon)))
             }
-            is Msg.Action -> if (role.value == Role.HOST) {
-                scope.launch { resolve(msg.playerId, msg.text, null, msg.headingDeg, msg.lat, msg.lon) }
-            }
+            is Msg.Action -> if (role.value == Role.HOST) scope.launch { submit(msg.playerId, msg.text, null, msg.headingDeg, msg.lat, msg.lon) }
             is Msg.AudioHeader -> if (role.value == Role.HOST) pendingAudio[endpointId] = msg
+            is Msg.SpriteHeader -> if (role.value == Role.CLIENT) pendingSprite = msg
             is Msg.Parry -> if (role.value == Role.HOST) armParry(msg.playerId)
             is Msg.Potion -> if (role.value == Role.HOST) applyPotion(msg.playerId)
             is Msg.State -> if (role.value == Role.CLIENT) {
-                val before = state.value.players[selfId]?.hp
+                val before = state.value
                 state.value = msg.state
                 trackFx(msg.state)
-                val after = msg.state.players[selfId]?.hp
-                if (before != null && after != null && after < before) buzz(120)
-                if (msg.state.phase == Phase.VICTORY && state.value.phase != Phase.VICTORY) buzz(40, 60, 40, 60, 200)
+                val hpBefore = before.players[selfId]?.hp; val hpAfter = msg.state.players[selfId]?.hp
+                if (hpBefore != null && hpAfter != null && hpAfter < hpBefore) buzz(120)
+                if (msg.state.phase != before.phase) onPhaseChanged(msg.state.phase)
             }
         }
     }
 
     private fun sendSprite(name: String, to: Collection<String>? = null) {
-        val f = File(app.cacheDir, name)
-        if (!f.exists()) return
+        val f = File(app.cacheDir, name); if (!f.exists()) return
         val bytes = f.readBytes()
         if (to == null) { link?.send(Msg.SpriteHeader(name, bytes.size)); link?.sendStream(bytes) }
         else { link?.send(Msg.SpriteHeader(name, bytes.size), to); link?.sendStream(bytes, to) }
     }
 
-    /** A STREAM payload arrived: on the host it is a spoken action (after an AudioHeader); on a client it is the monster sprite. */
     private fun onBinary(endpointId: String, bytes: ByteArray) {
         if (role.value == Role.CLIENT) {
-            val h = pendingSprite ?: return
-            pendingSprite = null
+            val h = pendingSprite ?: return; pendingSprite = null
             runCatching { File(app.cacheDir, h.name).writeBytes(bytes); spriteVersion.value++ }
             return
         }
         if (role.value != Role.HOST) return
         val h = pendingAudio.remove(endpointId) ?: run { status.value = "audio without header"; return }
-        scope.launch { resolve(h.playerId, null, bytes, h.headingDeg, h.lat, h.lon) }
+        scope.launch { submit(h.playerId, null, bytes, h.headingDeg, h.lat, h.lon) }
     }
 
     private fun broadcast() { trackFx(state.value); link?.send(Msg.State(state.value)) }
 
-    // ---------- game loop (host only) ----------
+    private fun onPhaseChanged(phase: Phase) {
+        when (phase) {
+            Phase.BATTLE -> sfx.loop("ambient_battle")
+            Phase.EXPLORE, Phase.NPC, Phase.VICTORY, Phase.DEFEAT -> sfx.loop("ambient_explore")
+            else -> sfx.stopLoop()
+        }
+    }
+
+    // ---------- stats & sound from the synced Fx stream (both roles) ----------
+
+    private fun trackFx(s: GameState) {
+        val f = s.fx ?: return
+        if (f.seq == lastFxSeq) return
+        lastFxSeq = f.seq
+        playFx(f, s)
+        val mine = f.playerId == selfId
+        statsStore.update { st ->
+            var n = st
+            if (mine && f.dealt > 0) n = n.copy(damageDealt = n.damageDealt + f.dealt, bestHit = maxOf(n.bestHit, f.dealt))
+            if (mine && f.taken > 0) n = n.copy(damageTaken = n.damageTaken + f.taken)
+            if (mine && f.parried) n = n.copy(parries = n.parries + 1)
+            if (mine && f.label == "LEGENDARY!") n = n.copy(legendaryHits = n.legendaryHits + 1)
+            if (mine && f.label == "stylish") n = n.copy(stylishHits = n.stylishHits + 1)
+            if (mine && (f.label.startsWith("🧪") || f.potion > 0)) n = n.copy(potions = n.potions + 1)
+            if (f.killed) n = n.copy(kills = n.kills + 1, bosses = n.bosses + (if (s.monster?.name?.startsWith("👑") == true) 1 else 0), longestFightTurns = maxOf(n.longestFightTurns, s.turn))
+            if (f.label == "spawn" && s.monster?.friendly == false) n = n.copy(encounters = n.encounters + 1)
+            n
+        }
+    }
+
+    private fun voicePitchFor(m: Monster?): Float {
+        if (m == null) return 0.55f
+        val h = abs(m.name.hashCode() % 100) / 100f
+        return if (m.friendly) 1.05f + h * 0.35f else 0.4f + h * 0.3f
+    }
+
+    private fun playFx(f: Fx, s: GameState) {
+        val pitch = voicePitchFor(s.monster)
+        when (f.label) {
+            "spawn" -> { if (s.monster?.friendly == true) { sfx.play("npc"); sfx.speak(f.taunt, pitch, 1.0f, 500) } else { sfx.play("spawn"); sfx.speak(f.taunt, pitch, 0.95f, 700) } }
+            "omens" -> sfx.play("omen")
+            "chase" -> { sfx.play("steps"); sfx.speak(f.taunt, pitch, 0.95f, 400) }
+            "parley" -> { sfx.play("npc", 200); sfx.speak(f.taunt, pitch, 1.0f, 600) }
+            "say" -> {
+                if (f.xpSpent > 0) sfx.play("coins")
+                if (f.potion > 0) sfx.play("potion")
+                if (f.item.isNotBlank() && f.xpSpent == 0) sfx.play("legendary", volume = 0.5f)
+                if (s.phase == Phase.NPC) sfx.speak(f.say, pitch, 1.0f, 150) else sfx.narrate(f.say, 150)
+            }
+            "epithet" -> { sfx.play("levelup"); sfx.narrate(f.say, 400) }
+            "windup" -> sfx.play("windup")
+            "pin" -> sfx.play("ping")
+            "bind" -> { sfx.play("npc"); sfx.speak(f.taunt, pitch, 1.0f, 300) }
+            else -> {
+                if (f.power.isNotBlank()) sfx.play("legendary", 0, 0.6f, 1.2f)
+                if (f.dealt > 0) { sfx.play("slash"); sfx.play("hit", 130) }
+                else if (f.playerId.isNotBlank() && f.potion == 0 && f.taken == 0 && !f.killed) { sfx.play("miss"); sfx.play("whoosh", 120) }
+                if (f.companionHits.isNotEmpty()) { sfx.play("hit", 420, 0.7f, 1.3f); sfx.speak("${f.companionHits.first()}!", 0.7f, 1.1f, 350) }
+                if (f.label == "LEGENDARY!") sfx.play("legendary", 200)
+                if (f.potion > 0) sfx.play("potion", 150)
+                if (f.parried) sfx.play("parry", 320)
+                else if (f.taken > 0) { sfx.play("attack", 260); if (f.playerId == selfId) sfx.play("hurt", 520) }
+                if (f.killed) { sfx.play("kill", 350); sfx.play("victory", 1100) }
+                else if (f.taunt.isNotBlank()) sfx.speak(f.taunt, pitch, 0.95f, if (f.taken > 0) 900 else 500)
+                if (f.levelUp) sfx.play("levelup", 1300)
+                if (f.wind) sfx.play("wind", 600)
+                if (narrateAloud.value && !f.killed) s.log.dropLast(1).lastOrNull()?.let { sfx.narrate(it, 1400) }
+            }
+        }
+    }
+
+    private fun recordEncounter(s: GameState, outcome: String, loot: String = "") {
+        val m = s.monster ?: return
+        val secs = if (fightStartedAt > 0) ((System.currentTimeMillis() - fightStartedAt) / 1000).toInt() else 0
+        statsStore.update { st -> st.copy(history = (st.history + Encounter(m.emoji, m.name, m.maxHp, outcome, s.turn, secs, loot, m.name.startsWith("👑"))).takeLast(30)) }
+    }
+
+    // ---------- gestures ----------
+
+    private fun onSwing(peak: Float) {
+        val s = state.value
+        if (s.phase != Phase.BATTLE || s.busy || (s.players[selfId]?.hp ?: 0) <= 0) return
+        lastSwing.value = peak
+        statsStore.update { it.copy(swings = it.swings + 1) }
+        buzz(30)
+        act(when { peak > 30f -> "I swing with everything I have, a wild all-out strike!"; peak > 22f -> "I swing hard at it!"; else -> "I take a swing at it." })
+    }
+
+    private fun onTwist() {
+        if (state.value.phase != Phase.BATTLE) return
+        buzz(20, 40, 20)
+        if (role.value == Role.HOST) armParry(selfId) else link?.send(Msg.Parry(selfId))
+    }
+
+    private fun armParry(playerId: String) {
+        state.update { s -> if (playerId in s.parries) s else s.copy(parries = s.parries + playerId).withLog("🛡 ${s.players[playerId]?.name ?: "?"} twists into a guard stance — next hit is parried") }
+        broadcast()
+    }
+
+    fun drinkPotion() {
+        if (role.value == Role.HOST) applyPotion(selfId) else link?.send(Msg.Potion(selfId))
+    }
+
+    private fun applyPotion(playerId: String) {
+        state.update { s ->
+            val p = s.players[playerId] ?: return@update s
+            if (p.potions <= 0 || p.hp >= p.maxHp) return@update s
+            val healed = min(POTION_HEAL, p.maxHp - p.hp)
+            s.copy(players = s.players + (p.id to p.copy(hp = p.hp + healed, potions = p.potions - 1)), fx = Fx(nextSeq(s), p.id, label = "🧪 +$healed"))
+                .withLog("🧪 ${p.name} drinks a potion: +$healed HP (${p.potions - 1} left)")
+        }
+        if (playerId == selfId) buzz(30, 30, 30)
+        broadcast()
+    }
+
+    private fun nextSeq(s: GameState) = (s.fx?.seq ?: 0) + 1
+
+    // ---------- exploring: omens, spawn, meet, DM chat ----------
+
+    fun scanOmens() = scope.launch {
+        val g = gemma ?: return@launch
+        if (role.value != Role.HOST || state.value.busy) return@launch
+        state.update { it.copy(busy = true).withLog("📡 You listen to the airwaves…") }; broadcast()
+        val signals = runCatching { scanner.scan() }.getOrElse { emptyList() }.take(6)
+        if (signals.isEmpty()) { state.update { it.copy(busy = false).withLog("📡 Silence. No spirits haunt this place — wild country.") }; broadcast(); return@launch }
+        val (texts, line) = runCatching { g.omens(signals.map { it.name }) }.getOrElse { null to "" }
+        if (texts == null) { state.update { it.copy(busy = false).withLog("📡 ${signals.size} signals, but the DM can't read them.") }; broadcast(); return@launch }
+        val omens = signals.zip(texts).map { (sig, t) -> Omen(sig.name, t.name, t.lore, t.threat, sig.dbm) }
+        statsStore.update { it.copy(omensRead = it.omensRead + omens.size) }
+        val lair = omens.filter { it.threat >= 4 }.maxByOrNull { it.dbm }
+        state.update { s ->
+            var next = s.copy(busy = false, omens = omens, bossLair = lair, fx = Fx(nextSeq(s), label = "omens"))
+            omens.forEach { o -> next = next.withLog("${"☠".repeat(o.threat)} ${o.name} (\"${o.signal}\"): ${o.lore}") }
+            if (lair != null) next = next.withLog("👑 This is the lair of ${lair.name}. The next monster will be a BOSS.")
+            if (line.isNotBlank()) next = next.withLog(line.take(160))
+            next
+        }
+        buzz(40, 40, 40); broadcast()
+    }
+
+    private fun reputation(): String = state.value.players.values.filter { it.epithet.isNotBlank() }.joinToString(", ") { "${it.name} ${it.epithet} (L${it.level})" }
 
     fun spawnFromCamera(imageCapture: ImageCapture) = scope.launch {
         val g = gemma ?: run { status.value = "load Gemma first"; return@launch }
         if (state.value.busy) return@launch
         val walked = steps.sinceReset.value
         state.update { it.copy(busy = true, steps = walked).withLog("The dungeon master studies the scene…") }; broadcast()
+        sfx.play("shutter")
         val path = runCatching { imageCapture.captureToFile(app) }
             .getOrElse { state.update { s -> s.copy(busy = false).withLog("camera failed: ${it.message}") }; broadcast(); return@launch }
         val bearing = compass.heading.value
@@ -372,72 +411,86 @@ class GameSession(private val app: Application) {
         val conditions = env.describe()
         val lair = state.value.bossLair
         val t0 = System.currentTimeMillis()
-        val (spawned, text) = runCatching { g.spawn(path, walked, conditions, lair?.let { "${it.name} (${it.lore})" }) }
-            .getOrElse { state.update { s -> s.copy(busy = false).withLog("Gemma error: ${it.message}") }; broadcast(); return@launch }
+        val (spawned, text) = runCatching { g.spawn(path, walked, conditions, lair?.let { "${it.name} (${it.lore})" }, reputation()) }
+            .getOrElse { spriteJob.cancel(); state.update { s -> s.copy(busy = false).withLog("Gemma error: ${it.message}") }; broadcast(); return@launch }
         if (spawned == null) {
             spriteJob.cancel()
             state.update { it.copy(busy = false).withLog("The DM hesitates: ${text.take(200)}") }
         } else {
-            // Exploring pays: every 4 steps walked since the last fight adds 1 HP (cap +50).
             val bonus = min(walked / 4, 50)
             val hp = (spawned.hp + bonus) * (if (lair != null) 3 else 2) / 2
             val spriteName = spriteJob.await()?.name ?: ""
             if (spriteName.isNotBlank()) spriteVersion.value++
             val m = Monster(if (lair != null) "👑 ${spawned.name}" else spawned.name, hp, hp, spawned.attacks, spawned.weakness, spawned.flavor, bearing, loc?.latitude ?: 0.0, loc?.longitude ?: 0.0, loc?.accuracy ?: 999f, spawned.emoji, spawned.accessories, spriteName)
-            steps.reset()
-            fightStartedAt = System.currentTimeMillis()
+            steps.reset(); fightStartedAt = System.currentTimeMillis()
             statsStore.update { it.copy(spawns = it.spawns + 1, spawnMs = it.spawnMs + (System.currentTimeMillis() - t0), stepsWalked = it.stepsWalked + walked, toolRetries = g.retries) }
             state.update {
-                var s = it.copy(phase = Phase.BATTLE, monster = m, busy = false, turn = 0, steps = 0, env = env.summary.value, parries = emptyList(), bossLair = null, fx = Fx(nextSeq(it), label = "spawn", taunt = spawned.taunt))
+                var s = it.copy(phase = Phase.BATTLE, monster = m, busy = false, turn = 0, steps = 0, env = env.summary.value, parries = emptyList(), bossLair = null, windup = 0, monsterDazed = false, recastUsed = false, fx = Fx(nextSeq(it), label = "spawn", taunt = spawned.taunt))
                     .withLog("${m.emoji} ${m.name} appears! ${m.flavor}")
                 if (lair != null) s = s.withLog("👑 BOSS FIGHT — champion of ${lair.name}. Double XP.")
-                if (conditions.isNotBlank()) s = s.withLog("(${conditions.replaceFirstChar { c -> c.uppercase() }}.)")
                 if (bonus > 0) s = s.withLog("It grew +$bonus HP from the $walked steps you walked.")
+                if (conditions.isNotBlank()) s = s.withLog("(${conditions.replaceFirstChar { c -> c.uppercase() }}.)")
                 if (text.isNotBlank()) s = s.withLog(text.take(200))
                 s
             }
-            buzz(60)
+            buzz(60); onPhaseChanged(Phase.BATTLE); startWindup()
         }
         broadcast()
+        state.value.monster?.sprite?.takeIf { it.isNotBlank() }?.let { sendSprite(it) }
     }
 
-    /** Host: scan Wi-Fi + BLE, let Gemma turn the names into lore; a menacing strong signal becomes a boss lair. */
-    fun scanOmens() = scope.launch {
+    /** Point at something and meet it instead of fighting it. */
+    fun meetFromCamera(imageCapture: ImageCapture) = scope.launch {
         val g = gemma ?: return@launch
-        if (role.value != Role.HOST || state.value.busy) return@launch
-        state.update { it.copy(busy = true).withLog("📡 You listen to the airwaves…") }; broadcast()
-        val signals = runCatching { scanner.scan() }.getOrElse { emptyList() }.take(6)
-        if (signals.isEmpty()) {
-            state.update { it.copy(busy = false).withLog("📡 Silence. No spirits haunt this place — wild country.") }; broadcast(); return@launch
+        if (state.value.busy) return@launch
+        state.update { it.copy(busy = true).withLog("You approach…") }; broadcast()
+        sfx.play("shutter")
+        val path = runCatching { imageCapture.captureToFile(app) }
+            .getOrElse { state.update { s -> s.copy(busy = false).withLog("camera failed: ${it.message}") }; broadcast(); return@launch }
+        val bearing = compass.heading.value
+        val loc = locator.location.value
+        val spriteJob = async(Dispatchers.IO) { runCatching { SpriteMaker.make(app, path) }.getOrNull() }
+        val (npc, text) = runCatching { g.meet(path, env.describe()) }
+            .getOrElse { spriteJob.cancel(); state.update { s -> s.copy(busy = false).withLog("Gemma error: ${it.message}") }; broadcast(); return@launch }
+        if (npc == null) {
+            spriteJob.cancel()
+            state.update { it.copy(busy = false).withLog("Nobody home: ${text.take(160)}") }
+        } else {
+            val spriteName = spriteJob.await()?.name ?: ""
+            if (spriteName.isNotBlank()) spriteVersion.value++
+            val m = Monster(npc.name, 0, 0, emptyList(), "", npc.offer, bearing, loc?.latitude ?: 0.0, loc?.longitude ?: 0.0, loc?.accuracy ?: 999f, npc.emoji, npc.accessories, spriteName, friendly = true, role = npc.role, offer = npc.offer)
+            state.update {
+                var s = it.copy(phase = Phase.NPC, monster = m, busy = false, fx = Fx(nextSeq(it), label = "spawn", taunt = npc.greeting))
+                    .withLog("${m.emoji} ${m.name}, ${m.role}: \"${npc.greeting}\"").withLog("They offer: ${m.offer}")
+                if (text.isNotBlank()) s = s.withLog(text.take(160))
+                s
+            }
+            buzz(30, 30, 30); onPhaseChanged(Phase.NPC)
         }
-        val (texts, line) = runCatching { g.omens(signals.map { it.name }) }.getOrElse { null to "" }
-        if (texts == null) {
-            state.update { it.copy(busy = false).withLog("📡 ${signals.size} signals, but the DM can't read them: ${line.take(120)}") }; broadcast(); return@launch
-        }
-        val omens = signals.zip(texts).map { (sig, t) -> Omen(sig.name, t.name, t.lore, t.threat, sig.dbm) }
-        statsStore.update { it.copy(omensRead = it.omensRead + omens.size) }
-        val lair = omens.filter { it.threat >= 4 }.maxByOrNull { it.dbm }
-        state.update { s ->
-            var next = s.copy(busy = false, omens = omens, bossLair = lair, fx = Fx(nextSeq(s), label = "omens"))
-            omens.forEach { o -> next = next.withLog("${"☠".repeat(o.threat)} ${o.name} (\"${o.signal}\", ${o.dbm} dBm): ${o.lore}") }
-            if (lair != null) next = next.withLog("👑 This is the lair of ${lair.name}. The next monster will be a BOSS.")
-            if (line.isNotBlank()) next = next.withLog(line.take(160))
-            next
-        }
-        buzz(40, 40, 40)
         broadcast()
+        state.value.monster?.sprite?.takeIf { it.isNotBlank() }?.let { sendSprite(it) }
     }
+
+    fun leaveNpc() {
+        if (role.value != Role.HOST || state.value.phase != Phase.NPC) return
+        state.update { s -> s.copy(phase = Phase.EXPLORE, monster = null).withLog("You wave goodbye to ${s.monster?.name ?: "them"}.") }
+        onPhaseChanged(Phase.EXPLORE); broadcast()
+    }
+
+    // ---------- input: text / voice / swing all land here, dispatched by phase on the host ----------
 
     fun act(text: String) {
         statsStore.update { it.copy(typedActions = it.typedActions + 1) }
-        val loc = locator.location.value
-        val h = compass.heading.value
-        if (role.value == Role.HOST) scope.launch { resolve(selfId, text, null, h, loc?.latitude ?: 0.0, loc?.longitude ?: 0.0) }
+        val loc = locator.location.value; val h = compass.heading.value
+        if (role.value == Role.HOST) scope.launch { submit(selfId, text, null, h, loc?.latitude ?: 0.0, loc?.longitude ?: 0.0) }
         else link?.send(Msg.Action(selfId, text, h, loc?.latitude ?: 0.0, loc?.longitude ?: 0.0))
+        sfx.play("blip", volume = 0.5f)
     }
 
     fun voiceStart() {
-        if (state.value.phase != Phase.BATTLE || state.value.busy) return
+        val ph = state.value.phase
+        if (ph != Phase.BATTLE && ph != Phase.EXPLORE && ph != Phase.NPC) return
+        if (state.value.busy) return
         recorder.start(); recording.value = true
     }
 
@@ -447,11 +500,115 @@ class GameSession(private val app: Application) {
         val wav = recorder.stop() ?: run { status.value = "too short — hold the button while you speak"; return }
         val loud = (wavLoudness(wav) * 100).roundToInt()
         statsStore.update { it.copy(shouts = it.shouts + 1, loudestShout = maxOf(it.loudestShout, loud)) }
-        val loc = locator.location.value
-        val h = compass.heading.value
+        val loc = locator.location.value; val h = compass.heading.value
         val lat = loc?.latitude ?: 0.0; val lon = loc?.longitude ?: 0.0
-        if (role.value == Role.HOST) scope.launch { resolve(selfId, null, wav, h, lat, lon) }
+        if (role.value == Role.HOST) scope.launch { submit(selfId, null, wav, h, lat, lon) }
         else { link?.send(Msg.AudioHeader(selfId, h, lat, lon, wav.size)); link?.sendStream(wav) }
+    }
+
+    private suspend fun submit(playerId: String, text: String?, audioWav: ByteArray?, headingDeg: Float, lat: Double, lon: Double) {
+        when (state.value.phase) {
+            Phase.BATTLE -> resolve(playerId, text, audioWav, headingDeg, lat, lon)
+            Phase.NPC -> npcTalk(playerId, text, audioWav)
+            Phase.EXPLORE, Phase.VICTORY, Phase.DEFEAT -> dmTalk(playerId, text, audioWav)
+            else -> {}
+        }
+    }
+
+    private suspend fun dmTalk(playerId: String, text: String?, audioWav: ByteArray?) {
+        val g = gemma ?: return
+        val p = state.value.players[playerId] ?: return
+        if (state.value.busy) return
+        state.update { it.copy(busy = true).withLog("${p.name}: ${text ?: "🎤 (asks the DM)"}") }; broadcast()
+        val summary = state.value.players.values.joinToString("; ") { "${it.name} L${it.level} ${it.hp}/${it.maxHp} HP, ${it.potions} potions, items: ${it.items.ifEmpty { listOf("none") }.joinToString()}" } + "; kills ${state.value.kills}"
+        val (reply, potion) = runCatching { g.dmChat(p.name, text, audioWav, summary) }.getOrElse { "" to false }
+        state.update { s ->
+            var me = s.players[p.id] ?: p
+            var healed = 0
+            if (potion && me.potions > 0 && me.hp < me.maxHp) { healed = min(POTION_HEAL, me.maxHp - me.hp); me = me.copy(hp = me.hp + healed, potions = me.potions - 1) }
+            var next = s.copy(busy = false, players = s.players + (me.id to me), fx = Fx(nextSeq(s), p.id, label = "say", say = reply, potion = healed))
+            if (reply.isNotBlank()) next = next.withLog("📜 ${reply.take(220)}")
+            if (healed > 0) next = next.withLog("🧪 ${me.name} drinks a potion: +$healed HP")
+            next
+        }
+        broadcast()
+    }
+
+    private suspend fun npcTalk(playerId: String, text: String?, audioWav: ByteArray?) {
+        val g = gemma ?: return
+        val s0 = state.value
+        val npc = s0.monster ?: return
+        val p = s0.players[playerId] ?: return
+        if (s0.busy) return
+        state.update { it.copy(busy = true).withLog("${p.name}: ${text ?: "🎤 (speaks)"}") }; broadcast()
+        val (reply, effects) = runCatching { g.npcChat(p.name, text, audioWav, npc.name, npc.role, p.xp, p.items) }.getOrElse { "" to Triple(null, null, 0) }
+        val (trade, gift, heal) = effects
+        state.update { s ->
+            var me = s.players[p.id] ?: p
+            var next = s.copy(busy = false)
+            var spent = 0; var item = ""; var healed = 0
+            if (trade != null) {
+                if (me.xp >= trade.priceXp) { me = me.copy(xp = me.xp - trade.priceXp, items = (me.items + trade.item).takeLast(6)); spent = trade.priceXp; item = trade.item; next = next.withLog("💰 ${me.name} buys ${trade.item} for ${trade.priceXp} XP: ${trade.effect}") }
+                else next = next.withLog("💰 ${trade.item} costs ${trade.priceXp} XP — ${me.name} has ${me.xp}.")
+            }
+            if (gift != null) { me = me.copy(items = (me.items + gift.item).takeLast(6)); item = gift.item; next = next.withLog("🎁 ${npc.name} gives ${me.name} ${gift.item}: ${gift.effect}") }
+            if (heal > 0 && me.hp < me.maxHp) { healed = min(heal, me.maxHp - me.hp); me = me.copy(hp = me.hp + healed); next = next.withLog("💚 ${npc.name} heals ${me.name}: +$healed HP") }
+            next = next.copy(players = next.players + (me.id to me), fx = Fx(nextSeq(s), p.id, label = "say", say = reply, taunt = "", xpSpent = spent, item = item, potion = healed))
+            if (reply.isNotBlank()) next = next.withLog("${npc.emoji} ${reply.take(220)}")
+            next
+        }
+        broadcast()
+    }
+
+    // ---------- battle ----------
+
+    private fun startWindup() {
+        windupJob?.cancel()
+        windupJob = scope.launch {
+            while (true) {
+                delay(1000)
+                val s = state.value
+                if (s.phase != Phase.BATTLE) break
+                if (s.busy) continue
+                val next = (s.windup + 100 / IDLE_STRIKE_SECONDS).coerceAtMost(100)
+                if (next >= 100) { monsterTurn(); continue }
+                state.update { it.copy(windup = next, fx = if (next in 70..74) Fx(nextSeq(it), label = "windup") else it.fx) }
+                broadcast()
+            }
+        }
+    }
+
+    /** The monster strikes a hesitating player on its own. */
+    private suspend fun monsterTurn() {
+        val g = gemma ?: return
+        val s0 = state.value
+        val m = s0.monster ?: return
+        val target = s0.players.values.filter { it.hp > 0 }.randomOrNull() ?: return
+        state.update { it.copy(busy = true, windup = 100) }; broadcast()
+        val strike = runCatching { g.monsterTurn(m.name, target.name, m.hp) }.getOrNull()
+        if (strike == null) { state.update { it.copy(busy = false, windup = 0) }; broadcast(); return }
+        val parried = target.id in s0.parries
+        var hurt = if (parried) 0 else strike.damageToPlayer
+        if (s0.monsterDazed) hurt /= 2
+        if (s0.players.values.count { it.hp > 0 } <= 1 && hurt > 0) hurt = ceil(hurt * 0.6f).toInt()
+        var wind = false
+        state.update { s ->
+            val cur = s.players[target.id] ?: target
+            var hp = (cur.hp - hurt).coerceAtLeast(0)
+            var me = cur.copy(hp = hp)
+            if (hp == 0 && me.secondWind) { wind = true; me = me.copy(hp = SECOND_WIND_HP, secondWind = false) }
+            val players = s.players + (me.id to me)
+            var next = s.copy(busy = false, windup = 0, monsterDazed = false, parries = s.parries - target.id, players = players,
+                fx = Fx(nextSeq(s), target.id, taken = hurt, parried = parried && strike.damageToPlayer > 0, taunt = strike.taunt, wind = wind))
+                .withLog("⚡ ${m.name} strikes while ${target.name} hesitates!").withLog(strike.narration)
+                .withLog(if (parried) "🛡 parried ${strike.damageToPlayer}" else if (s.monsterDazed) "−$hurt ${target.name} (dazed, halved)" else "−$hurt ${target.name}")
+            if (wind) next = next.withLog("💫 ${me.name} refuses to fall — second wind!")
+            if (players.values.all { it.hp <= 0 }) next = next.copy(phase = Phase.DEFEAT).withLog("The party falls. ${m.name} gloats.")
+            next
+        }
+        if (target.id == selfId && hurt > 0) buzz(120)
+        if (state.value.phase == Phase.DEFEAT) { statsStore.update { it.copy(wipes = it.wipes + 1) }; recordEncounter(state.value, "wiped the party"); onPhaseChanged(Phase.DEFEAT) }
+        broadcast()
     }
 
     private suspend fun resolve(playerId: String, text: String?, audioWav: ByteArray?, headingDeg: Float, lat: Double, lon: Double) {
@@ -466,14 +623,38 @@ class GameSession(private val app: Application) {
         val flanking = s0.players.values.any { o -> o.id != p.id && o.hp > 0 && abs(headingDelta(o.headingDeg, headingDeg)) > FLANK_MIN_DEG }
 
         val shown = text ?: "🎤 (${(audioWav!!.size - 44) / 32000}s of shouting)"
-        state.update { it.copy(busy = true, players = it.players + (p.id to p)).withLog("${p.name}: $shown") }; broadcast()
+        state.update { it.copy(busy = true, windup = 0, players = it.players + (p.id to p)).withLog("${p.name}: $shown") }; broadcast()
         val t0 = System.currentTimeMillis()
-        val (r, reply) = runCatching { g.resolve(p.name, text, audioWav, m.name, m.hp, m.weakness, facing, flanking, p.items, p.potions) }
+        val (r, reply) = runCatching { g.resolve(p.name, text, audioWav, m.name, m.hp, m.weakness, facing, flanking, p.items, p.potions, powersFor(p.level)) }
             .getOrElse { state.update { s -> s.copy(busy = false).withLog("Gemma error: ${it.message}") }; broadcast(); return }
         statsStore.update { it.copy(resolves = it.resolves + 1, resolveMs = it.resolveMs + (System.currentTimeMillis() - t0), audioResolves = it.audioResolves + (if (audioWav != null) 1 else 0), toolRetries = g.retries) }
-        if (r == null) {
-            state.update { it.copy(busy = false).withLog("The DM mumbles: ${reply.take(200)}") }; broadcast(); return
+        if (r == null) { state.update { it.copy(busy = false).withLog("The DM mumbles: ${reply.take(200)}") }; broadcast(); return }
+
+        // ---- powers (level-gated verbs) ----
+        val power = g.lastPower?.takeIf { it.first in powersFor(p.level) }
+        var powerLog = ""
+        var dazeNow = false
+        var recastTo: String? = null
+        var parleyWon = false
+        var hurtMul = 1f
+        when (power?.first) {
+            "Taunt" -> if (r.style >= 3) { dazeNow = true; powerLog = "😤 Taunt lands — ${m.name} is dazed, its next strike is halved" } else powerLog = "😤 The taunt falls flat."
+            "Parley" -> if (r.style >= 4) { parleyWon = true; powerLog = "🕊 Parley! ${m.name} lowers its guard and listens." } else { hurtMul = 2f; powerLog = "🕊 ${m.name} isn't listening — and punishes the pause." }
+            "Recast" -> if (!s0.recastUsed && power.second.isNotBlank()) { recastTo = power.second; powerLog = "🔮 Recast: ${m.name} is now weak to ${power.second}" } else powerLog = "🔮 Recast fizzles."
+            else -> {}
         }
+        if (parleyWon) {
+            recordEncounter(s0, "parleyed by ${p.name}")
+            state.update { s ->
+                val me = (s.players[p.id] ?: p).copy(xp = (s.players[p.id] ?: p).xp + 40)
+                s.copy(phase = Phase.NPC, busy = false, windup = 0, players = s.players + (me.id to me),
+                    monster = m.copy(friendly = true, role = "sage", offer = "a truce, and whatever it knows"),
+                    fx = Fx(nextSeq(s), p.id, label = "parley", taunt = r.taunt.ifBlank { "...FINE. TALK." }, power = "Parley"))
+                    .withLog(r.narration).withLog(powerLog).withLog("+40 xp for words over wounds")
+            }
+            windupJob?.cancel(); onPhaseChanged(Phase.NPC); broadcast(); return
+        }
+
         var dmg = r.damageToMonster
         if (!facing) dmg /= 2
         if (flanking) dmg = (dmg * 1.5f).roundToInt()
@@ -481,14 +662,17 @@ class GameSession(private val app: Application) {
         if (dmg > 0) dmg += cry
         val crit = r.style >= 4
         if (r.style >= 5) dmg *= 2 else if (r.style == 4) dmg = (dmg * 1.5f).roundToInt()
-        // Voice/typed item use: Gemma called use_item with a name; match it against what the player carries.
         val itemUsed = r.usedItem?.let { want -> p.items.firstOrNull { it.equals(want, true) || it.contains(want, true) || want.contains(it, true) } }
         if (itemUsed != null && dmg > 0) dmg = (dmg * 1.5f).roundToInt()
         val wantsPotion = r.drankPotion && p.potions > 0
+        // companions pile on
+        val companionHits = p.companions.map { it.attack }
+        val companionDmg = p.companions.size * COMPANION_DMG
+        dmg += companionDmg
         val parried = playerId in s0.parries
         val aliveCount = s0.players.values.count { it.hp > 0 }
-        // Solo mercy: a lone player takes 60% of the monster's damage.
-        var hurt = if (parried) 0 else r.damageToPlayer
+        var hurt = if (parried) 0 else (r.damageToPlayer * hurtMul).roundToInt()
+        if (s0.monsterDazed) hurt /= 2
         if (aliveCount <= 1 && hurt > 0) hurt = ceil(hurt * 0.6f).toInt()
         val newMonsterHp = (m.hp - dmg).coerceAtLeast(0)
         val killed = newMonsterHp == 0
@@ -501,32 +685,40 @@ class GameSession(private val app: Application) {
             if (!facing) append(" (not facing it)")
             if (cry > 0) append(" (battle cry +$cry)")
             if (itemUsed != null) append(" (🎁 $itemUsed ×1.5)")
+            if (companionDmg > 0) append(" (🐾 +$companionDmg)")
             if (parried && r.damageToPlayer > 0) append(", 🛡 parried ${r.damageToPlayer}")
             else if (hurt > 0) append(", −$hurt ${p.name}")
             if (xpGain > 0) append(", +$xpGain xp")
         }
         if (playerId == selfId && hurt > 0) buzz(120)
         var wind = false
+        var leveledTo = 0
         state.update { s ->
-            val cur = s.players[p.id] ?: p   // re-read: a potion may have landed while Gemma was thinking
+            val cur = s.players[p.id] ?: p
             val healed = if (wantsPotion && cur.potions > 0) min(POTION_HEAL, cur.maxHp - cur.hp) else 0
-            var hpNow = (cur.hp + healed - hurt).coerceAtLeast(0)
-            var me = cur.copy(hp = hpNow, xp = cur.xp + xpGain, headingDeg = headingDeg, lat = lat, lon = lon, potions = if (healed > 0 || (wantsPotion && cur.potions > 0)) cur.potions - 1 else cur.potions)
+            val hpNow = (cur.hp + healed - hurt).coerceAtLeast(0)
+            var me = cur.copy(hp = hpNow, xp = cur.xp + xpGain, headingDeg = headingDeg, lat = lat, lon = lon, potions = if (wantsPotion && cur.potions > 0) cur.potions - 1 else cur.potions)
             if (hpNow == 0 && me.secondWind && !killed) { wind = true; me = me.copy(hp = SECOND_WIND_HP, secondWind = false) }
             val newLevel = levelFor(me.xp)
             var next = s.copy(
-                busy = false, turn = s.turn + 1, monster = m.copy(hp = newMonsterHp), parries = s.parries - playerId,
+                busy = false, turn = s.turn + 1, windup = 0, parries = s.parries - playerId,
+                monster = m.copy(hp = newMonsterHp, weakness = recastTo ?: m.weakness),
+                monsterDazed = dazeNow || (s.monsterDazed && hurt == 0 && r.damageToPlayer == 0), recastUsed = s.recastUsed || recastTo != null,
                 fx = Fx(nextSeq(s), playerId, dealt = dmg, taken = hurt, crit = crit, parried = parried && r.damageToPlayer > 0, killed = killed,
                     label = if (r.style >= 5) "LEGENDARY!" else if (r.style == 4) "stylish" else "", taunt = if (killed) "" else r.taunt,
-                    potion = healed, item = itemUsed ?: ""),
+                    potion = healed, item = itemUsed ?: "", power = power?.first ?: "", companionHits = companionHits),
             ).withLog(r.narration).withLog(tag)
+            if (powerLog.isNotBlank()) next = next.withLog(powerLog)
+            if (companionHits.isNotEmpty()) next = next.withLog("🐾 " + p.companions.joinToString(", ") { "${it.emoji} ${it.name}: ${it.attack}" })
             if (healed > 0) next = next.withLog("🧪 ${me.name} drinks a potion: +$healed HP (${me.potions} left)")
             else if (r.drankPotion && cur.potions <= 0) next = next.withLog("🧪 ${me.name} reaches for a potion — the bag is empty")
-            if (wind) next = next.withLog("💫 ${me.name} refuses to fall — second wind! Back up with ${SECOND_WIND_HP} HP.")
+            if (wind) next = next.withLog("💫 ${me.name} refuses to fall — second wind! Back up with $SECOND_WIND_HP HP.")
             val leveled = newLevel > me.level
             if (leveled) {
+                leveledTo = newLevel
                 me = me.copy(level = newLevel, maxHp = maxHpFor(newLevel), hp = maxHpFor(newLevel))
                 next = next.withLog("⬆ ${me.name} reached level $newLevel! Max HP ${me.maxHp}, fully healed.")
+                powerUnlockedAt(newLevel)?.let { next = next.withLog("✨ Unlocked: $it") }
             }
             next = next.copy(fx = next.fx?.copy(levelUp = leveled, wind = wind))
             var players = next.players + (me.id to me)
@@ -538,50 +730,79 @@ class GameSession(private val app: Application) {
         }
         if (wind && playerId == selfId) { buzz(40, 40, 40, 40, 40); statsStore.update { it.copy(secondWinds = it.secondWinds + 1) } }
         val after = state.value
-        if (after.phase == Phase.DEFEAT) { statsStore.update { it.copy(wipes = it.wipes + 1) }; recordEncounter(after, "wiped the party") }
+        if (after.phase == Phase.DEFEAT) { statsStore.update { it.copy(wipes = it.wipes + 1) }; recordEncounter(after, "wiped the party"); onPhaseChanged(Phase.DEFEAT) }
         broadcast()
         if (killed) {
+            lastSlain = m.copy(hp = 0)
+            windupJob?.cancel(); onPhaseChanged(Phase.VICTORY)
             if (playerId == selfId) buzz(40, 60, 40, 60, 200)
             val (loot, line) = runCatching { g.loot(m.name, p.name) }.getOrElse { null to "" }
             recordEncounter(state.value, "slain by ${p.name}", loot?.name ?: "")
             state.update { s ->
                 val me = s.players[p.id] ?: return@update s
                 var next = s
-                if (loot != null) {
-                    next = next.copy(players = next.players + (me.id to me.copy(items = (me.items + loot.name).takeLast(6))))
-                        .withLog("🎁 ${me.name} loots ${loot.name}: ${loot.effect}")
-                }
+                if (loot != null) next = next.copy(players = next.players + (me.id to me.copy(items = (me.items + loot.name).takeLast(6)))).withLog("🎁 ${me.name} loots ${loot.name}: ${loot.effect}")
                 if (line.isNotBlank()) next = next.withLog(line.take(200))
+                if (companionCapacity(me.level) > me.companions.size) next = next.withLog("🐾 Level ${me.level} power: you may Bind ${m.name} as a companion.")
                 next
             }
             broadcast()
         }
+        if (leveledTo > 0) grantEpithet(p.id, leveledTo)
+    }
+
+    private suspend fun grantEpithet(playerId: String, level: Int) {
+        val g = gemma ?: return
+        val p = state.value.players[playerId] ?: return
+        state.update { it.copy(busy = true) }; broadcast()
+        val deeds = statsStore.stats.value.history.takeLast(4).joinToString("; ") { "${it.name} ${it.outcome}" } + "; " + state.value.log.takeLast(4).joinToString(" | ")
+        val title = runCatching { g.epithet(p.name, level, deeds) }.getOrNull()
+        state.update { s ->
+            val me = s.players[playerId] ?: return@update s.copy(busy = false)
+            if (title == null) s.copy(busy = false)
+            else s.copy(busy = false, players = s.players + (me.id to me.copy(epithet = title)), fx = Fx(nextSeq(s), playerId, label = "epithet", say = "${me.name} is now known as ${me.name} $title"))
+                .withLog("🏷 ${me.name} is now known as ${me.name} $title")
+        }
+        broadcast()
+    }
+
+    /** Host, after a kill at L4+: bind the fallen monster as a companion. */
+    fun bindFallen() {
+        if (role.value != Role.HOST) return
+        val m = lastSlain ?: return
+        state.update { s ->
+            val me = s.players[selfId] ?: return@update s
+            if (s.phase != Phase.VICTORY || companionCapacity(me.level) <= me.companions.size) return@update s
+            val c = Ally(m.name.removePrefix("👑 "), m.emoji, m.attacks.firstOrNull() ?: "Bite", m.sprite)
+            s.copy(players = s.players + (me.id to me.copy(companions = me.companions + c)), fx = Fx(nextSeq(s), selfId, label = "bind", taunt = "I SERVE... FOR NOW."))
+                .withLog("🐾 ${c.emoji} ${c.name} is bound to ${me.name}. It will use ${c.attack} every turn.")
+        }
+        lastSlain = null; broadcast()
     }
 
     fun nextEncounter() {
         if (role.value != Role.HOST) return
         if (state.value.phase == Phase.BATTLE) recordEncounter(state.value, "fled")
+        windupJob?.cancel()
         steps.reset()
-        state.update { s -> s.copy(phase = Phase.EXPLORE, monster = null, steps = 0, fx = null, players = s.players.mapValues { (_, p) -> p.copy(hp = maxOf(p.hp, p.maxHp / 2), potions = maxOf(p.potions, 1)) }).withLog("The party regroups. Walk around, then point at something new.") }
-        broadcast()
+        state.update { s -> s.copy(phase = Phase.EXPLORE, monster = null, steps = 0, fx = null, windup = 0, players = s.players.mapValues { (_, p) -> p.copy(hp = maxOf(p.hp, p.maxHp / 2), potions = maxOf(p.potions, 1)) }).withLog("The party regroups. Walk around, then point at something new.") }
+        onPhaseChanged(Phase.EXPLORE); broadcast()
     }
 
-    /** Host: the monster moves to face the player who turned away (or re-pins on long press). */
     fun reanchorMonster(chase: Boolean) {
         if (role.value != Role.HOST) return
         val h = compass.heading.value
         val loc = locator.location.value
         state.update { s ->
             val m = s.monster ?: return@update s
-            if (s.phase != Phase.BATTLE) return@update s
+            if (s.phase != Phase.BATTLE && s.phase != Phase.NPC) return@update s
             val moved = m.copy(bearingDeg = h, lat = loc?.latitude ?: m.lat, lon = loc?.longitude ?: m.lon, acc = loc?.accuracy ?: m.acc)
             if (chase) s.copy(monster = moved, fx = Fx(nextSeq(s), taunt = "YOU CAN'T RUN!", label = "chase")).withLog("👣 ${m.name} lumbers around to face you.")
-            else s.copy(monster = moved).withLog("📍 ${m.name} re-pinned where you're looking.")
+            else s.copy(monster = moved, fx = Fx(nextSeq(s), label = "pin")).withLog("📍 ${m.name} re-pinned where you're looking.")
         }
         broadcast()
     }
 
-    /** Bearing a player should face to see the monster. GPS geometry only when both fixes are sharp and the gap is real; indoors that is never, so the spawn bearing rules. */
     fun bearingToMonster(m: Monster, p: Player?): Float {
         if (p == null || p.lat == 0.0 || m.lat == 0.0) return m.bearingDeg
         if (p.acc > GPS_MAX_ACC_METERS || m.acc > GPS_MAX_ACC_METERS) return m.bearingDeg
@@ -609,5 +830,7 @@ class GameSession(private val app: Application) {
         const val GPS_MAX_ACC_METERS = 10f
         const val POTION_HEAL = 12
         const val SECOND_WIND_HP = 6
+        const val IDLE_STRIKE_SECONDS = 25
+        const val COMPANION_DMG = 4
     }
 }

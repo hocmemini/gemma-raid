@@ -23,6 +23,9 @@ data class SpawnedMonster(val name: String, val hp: Int, val attacks: List<Strin
 data class Resolved(val damageToMonster: Int, val damageToPlayer: Int, val narration: String, val style: Int, val taunt: String, val drankPotion: Boolean = false, val usedItem: String? = null)
 data class Loot(val name: String, val effect: String)
 data class OmenText(val name: String, val lore: String, val threat: Int)
+data class SpawnedNpc(val name: String, val role: String, val emoji: String, val accessories: List<String>, val greeting: String, val offer: String)
+data class Strike(val damageToPlayer: Int, val narration: String, val taunt: String)
+data class Trade(val item: String, val effect: String, val priceXp: Int)
 
 /**
  * The tools Gemma 4 calls. LiteRT-LM runs them automatically mid-generation; they just stash
@@ -35,6 +38,63 @@ class GameTools : ToolSet {
     @Volatile var omens: List<OmenText>? = null
     @Volatile var potionRequested = false
     @Volatile var itemUsed: String? = null
+    @Volatile var npc: SpawnedNpc? = null
+    @Volatile var strike: Strike? = null
+    @Volatile var trade: Trade? = null
+    @Volatile var gift: Trade? = null
+    @Volatile var heal: Int = 0
+    @Volatile var power: Pair<String, String>? = null
+    @Volatile var epithet: String? = null
+
+    @Tool(description = "The player invokes one of their level powers by name: Taunt, Parley, Bind or Recast. Call in addition to resolve_action when they do.")
+    fun use_power(
+        @ToolParam(description = "Exactly one of: Taunt, Parley, Bind, Recast") power: String,
+        @ToolParam(description = "For Recast: the new weakness they declare. Otherwise empty.") argument: String,
+    ): Map<String, Any> { this.power = power.trim().replaceFirstChar { it.uppercase() } to argument.take(40); return mapOf("ok" to true) }
+
+    @Tool(description = "Grant the player an epithet (title) earned by how they fight. Call exactly once.")
+    fun grant_epithet(@ToolParam(description = "Three to five words, e.g. 'the Lemon-Juicer' or 'Scourge of Staplers'") title: String): Map<String, Any> {
+        epithet = title.take(40); return mapOf("ok" to true)
+    }
+
+    @Tool(description = "Turn the real-world object in the photo into a FRIENDLY non-player character the players can talk to. Call exactly once.")
+    fun spawn_npc(
+        @ToolParam(description = "Character name derived from the object, e.g. 'Brenda the Stapler-Smith'") name: String,
+        @ToolParam(description = "One of: merchant, sage, healer, oddball") role: String,
+        @ToolParam(description = "One single emoji for the character") emoji: String,
+        @ToolParam(description = "Two or three single emoji features to draw on the object: eyes, a hat, a tool") accessories: List<String>,
+        @ToolParam(description = "What they say as the players walk up, under 15 words") greeting: String,
+        @ToolParam(description = "One short line of what they offer: wares, wisdom, healing or nonsense") offer: String,
+    ): Map<String, Any> {
+        npc = SpawnedNpc(name.take(40), role.lowercase().take(12), emoji.take(4).ifBlank { "🙂" }, accessories.map { it.trim().take(4) }.filter { it.isNotBlank() }.take(3), greeting.take(90), offer.take(90))
+        Log.i("Gemma", "spawn_npc $name role=$role | $greeting")
+        return mapOf("ok" to true)
+    }
+
+    @Tool(description = "The monster attacks a player on its own because they hesitated. Call exactly once.")
+    fun monster_strike(
+        @ToolParam(description = "Damage dealt to the player, 1 to 8") damageToPlayer: Int,
+        @ToolParam(description = "One punchy sentence describing the attack, in second person") narration: String,
+        @ToolParam(description = "What the monster shouts, ALL CAPS, under 8 words") taunt: String,
+    ): Map<String, Any> {
+        strike = Strike(damageToPlayer.coerceIn(1, 12), narration, taunt.take(60)); return mapOf("ok" to true)
+    }
+
+    @Tool(description = "An NPC merchant offers to sell the player an item for XP. Call when the player wants to buy or asks what is for sale.")
+    fun sell_item(
+        @ToolParam(description = "Item name") name: String,
+        @ToolParam(description = "One short sentence: what it does in a fight") effect: String,
+        @ToolParam(description = "Price in XP, 20 to 150") priceXp: Int,
+    ): Map<String, Any> { trade = Trade(name.take(40), effect.take(120), priceXp.coerceIn(10, 300)); return mapOf("ok" to true) }
+
+    @Tool(description = "An NPC gives the player an item for free. Call at most once per character, when the player earns or charms it out of them.")
+    fun give_item(
+        @ToolParam(description = "Item name") name: String,
+        @ToolParam(description = "One short sentence: what it does in a fight") effect: String,
+    ): Map<String, Any> { gift = Trade(name.take(40), effect.take(120), 0); return mapOf("ok" to true) }
+
+    @Tool(description = "A healer NPC restores the player's health. Call when the player asks to be healed.")
+    fun heal_player(@ToolParam(description = "HP restored, 5 to 30") amount: Int): Map<String, Any> { heal = amount.coerceIn(1, 40); return mapOf("ok" to true) }
 
     @Tool(description = "The player drinks a healing potion. Call this when the player says they drink, quaff, chug or use a potion, in addition to resolve_action.")
     fun drink_potion(): Map<String, Any> { potionRequested = true; return mapOf("ok" to true) }
@@ -155,13 +215,14 @@ class Gemma(private val modelPath: String, private val useGpu: Boolean) {
     }
 
     /** Photo of a real object -> monster via the spawn_monster tool. Starts a fresh conversation. */
-    suspend fun spawn(imagePath: String, stepsWalked: Int, environment: String, bossLair: String?): Pair<SpawnedMonster?, String> = withContext(Dispatchers.IO) {
+    suspend fun spawn(imagePath: String, stepsWalked: Int, environment: String, bossLair: String?, reputation: String): Pair<SpawnedMonster?, String> = withContext(Dispatchers.IO) {
         tools.spawned = null
         newConversation()
         val prompt = buildString {
             append(SPAWN_PROMPT)
             if (stepsWalked > 30) append(" The players walked $stepsWalked steps to find it, so make it bigger and nastier than usual.")
             if (environment.isNotBlank()) append(" Conditions: $environment. Let that shape the monster.")
+            if (reputation.isNotBlank()) append(" The players are known as: $reputation; the monster has heard of them.")
             if (bossLair != null) append(" IMPORTANT: this place is the lair of $bossLair. The monster is its champion or the entity itself: make it a BOSS, hp 60 to 80, more menacing than usual.")
         }
         val t0 = System.currentTimeMillis()
@@ -189,8 +250,9 @@ class Gemma(private val modelPath: String, private val useGpu: Boolean) {
         flanking: Boolean,
         items: List<String>,
         potions: Int,
+        powers: List<String>,
     ): Pair<Resolved?, String> = withContext(Dispatchers.IO) {
-        tools.resolved = null; tools.potionRequested = false; tools.itemUsed = null
+        tools.resolved = null; tools.potionRequested = false; tools.itemUsed = null; tools.power = null
         if (turns >= MAX_TURNS_PER_CONVERSATION) {
             newConversation(" A battle is in progress: $monsterName (HP $monsterHp, weak to $weakness) fights the players.")
         }
@@ -198,6 +260,7 @@ class Gemma(private val modelPath: String, private val useGpu: Boolean) {
             append("$playerName acts against $monsterName (HP $monsterHp, weak to: $weakness). ")
             if (items.isNotEmpty()) append("$playerName carries: ${items.joinToString(", ")}. If they use one by name, also call use_item. ")
             if (potions > 0) append("$playerName has $potions healing potion${if (potions > 1) "s" else ""}; if they say they drink one, also call drink_potion. ")
+            if (powers.isNotEmpty()) append("$playerName's powers, invoked by name: ${powers.joinToString(", ")}. If they invoke one, also call use_power. ")
             if (!facing) append("They are NOT facing the monster, so the action mostly misses. ")
             if (flanking) append("Another player is attacking from a different side, so this is a flanking strike. ")
             if (audioWav != null) append("Their action is spoken in the attached audio clip. ")
@@ -215,6 +278,56 @@ class Gemma(private val modelPath: String, private val useGpu: Boolean) {
         tools.resolved?.copy(drankPotion = tools.potionRequested, usedItem = tools.itemUsed) to reply.plainText()
     }
 
+    /** Photo -> friendly NPC via spawn_npc. Fresh conversation that then carries the NPC's persona. */
+    suspend fun meet(imagePath: String, environment: String): Pair<SpawnedNpc?, String> = withContext(Dispatchers.IO) {
+        tools.npc = null
+        newConversation()
+        val prompt = buildString {
+            append("Look at this photo. Turn the most prominent object into a friendly character the players can talk to: a merchant selling odd wares for XP, a sage with lore and tips, a healer, or an oddball. ")
+            if (environment.isNotBlank()) append("Conditions: $environment. ")
+            append("Call spawn_npc, then greet the players in character in one line.")
+        }
+        val t0 = System.currentTimeMillis()
+        var reply = send(Contents.of(Content.ImageFile(imagePath), Content.Text(prompt)))
+        if (tools.npc == null) { retries++; reply = send(Contents.of("You must call the spawn_npc tool for the object in the photo now.")) }
+        Log.i(TAG, "meet took ${System.currentTimeMillis() - t0} ms; tool=${tools.npc != null}")
+        tools.npc to reply.plainText()
+    }
+
+    /** Chat with the current NPC (continues the conversation started by meet). */
+    suspend fun npcChat(playerName: String, text: String?, audioWav: ByteArray?, npcName: String, role: String, xp: Int, items: List<String>): Pair<String, Triple<Trade?, Trade?, Int>> = withContext(Dispatchers.IO) {
+        tools.trade = null; tools.gift = null; tools.heal = 0
+        val situation = buildString {
+            append("You are now $npcName, the $role. Stay in character, under 40 words. $playerName has $xp XP and carries: ${items.ifEmpty { listOf("nothing") }.joinToString(", ")}. ")
+            append("Use sell_item for purchases (only if they can afford it), give_item for a gift, heal_player to heal. ")
+            if (audioWav != null) append("$playerName speaks in the attached audio.") else append("$playerName says: \"$text\"")
+        }
+        val reply = if (audioWav != null) send(Contents.of(Content.AudioBytes(audioWav), Content.Text(situation))) else send(Contents.of(situation))
+        Log.i(TAG, "npcChat trade=${tools.trade} gift=${tools.gift} heal=${tools.heal} | ${reply.plainText().take(80)}")
+        reply.plainText() to Triple(tools.trade, tools.gift, tools.heal)
+    }
+
+    /** Free-form talk with the dungeon master while exploring. */
+    suspend fun dmChat(playerName: String, text: String?, audioWav: ByteArray?, summary: String): Pair<String, Boolean> = withContext(Dispatchers.IO) {
+        tools.potionRequested = false
+        if (conversation == null || turns >= MAX_TURNS_PER_CONVERSATION) newConversation(" The party is exploring between fights. Answer as the dungeon master: lore, tips, banter. Under 40 words.")
+        val situation = buildString {
+            append("Party status: $summary. ")
+            if (audioWav != null) append("$playerName speaks to you in the attached audio.") else append("$playerName says: \"$text\"")
+            append(" If they drink a potion, call drink_potion.")
+        }
+        val reply = if (audioWav != null) send(Contents.of(Content.AudioBytes(audioWav), Content.Text(situation))) else send(Contents.of(situation))
+        reply.plainText() to tools.potionRequested
+    }
+
+    /** The monster takes a free swing at a hesitating player. */
+    suspend fun monsterTurn(monsterName: String, targetName: String, monsterHp: Int): Strike? = withContext(Dispatchers.IO) {
+        tools.strike = null
+        var reply = send(Contents.of("$targetName hesitates. $monsterName (HP $monsterHp) seizes the moment and attacks them. Call monster_strike."))
+        if (tools.strike == null) { retries++; reply = send(Contents.of("Call the monster_strike tool now.")) }
+        tools.strike
+    }
+
     /** Nearby signal names -> lore via write_omens. Uses a throwaway conversation so it doesn't pollute a battle. */
     suspend fun omens(signals: List<String>): Pair<List<OmenText>?, String> = withContext(Dispatchers.IO) {
         tools.omens = null
@@ -227,6 +340,21 @@ class Gemma(private val modelPath: String, private val useGpu: Boolean) {
         Log.i(TAG, "omens took ${System.currentTimeMillis() - t0} ms; tool=${tools.omens != null}")
         c.close(); conversation = keep
         tools.omens to reply.plainText()
+    }
+
+    val lastPower: Pair<String, String>? get() = tools.power
+
+    /** Level-up: a title from how they fought. Throwaway conversation. */
+    suspend fun epithet(playerName: String, level: Int, deeds: String): String? = withContext(Dispatchers.IO) {
+        tools.epithet = null
+        val keep = conversation; conversation = null
+        val c = newConversation()
+        runCatching {
+            var reply = c.sendMessage(Contents.of("$playerName just reached level $level. Their deeds: $deeds. Call grant_epithet with a short, funny, specific title."))
+            if (tools.epithet == null) c.sendMessage(Contents.of("Call the grant_epithet tool now."))
+        }
+        c.close(); conversation = keep
+        tools.epithet
     }
 
     /** After a kill: ask for an item salvaged from the object. */

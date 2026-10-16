@@ -10,29 +10,26 @@ import android.util.Log
 import com.hocmemini.raid.R
 import java.util.Locale
 
-/** Chiptune effects (synthesized, see scripts/gen-sfx.py) plus a text-to-speech monster voice for taunts. */
+/** Chiptune effects (synthesized, see scripts/gen-sfx.py) plus text-to-speech voices for monsters, NPCs and the DM. */
 class Sfx(context: Context) {
-    private val pool = SoundPool.Builder().setMaxStreams(6)
+    private val pool = SoundPool.Builder().setMaxStreams(8)
         .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_GAME).setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
         .build()
-    private val ids = mapOf(
-        "spawn" to pool.load(context, R.raw.sfx_spawn, 1),
-        "slash" to pool.load(context, R.raw.sfx_slash, 1),
-        "hit" to pool.load(context, R.raw.sfx_hit, 1),
-        "attack" to pool.load(context, R.raw.sfx_attack, 1),
-        "parry" to pool.load(context, R.raw.sfx_parry, 1),
-        "potion" to pool.load(context, R.raw.sfx_potion, 1),
-        "legendary" to pool.load(context, R.raw.sfx_legendary, 1),
-        "kill" to pool.load(context, R.raw.sfx_kill, 1),
-        "victory" to pool.load(context, R.raw.sfx_victory, 1),
-        "levelup" to pool.load(context, R.raw.sfx_levelup, 1),
-        "wind" to pool.load(context, R.raw.sfx_wind, 1),
-        "omen" to pool.load(context, R.raw.sfx_omen, 1),
-        "miss" to pool.load(context, R.raw.sfx_miss, 1),
-    )
+    private val ids: Map<String, Int> = mapOf(
+        "spawn" to R.raw.sfx_spawn, "slash" to R.raw.sfx_slash, "hit" to R.raw.sfx_hit, "attack" to R.raw.sfx_attack,
+        "parry" to R.raw.sfx_parry, "potion" to R.raw.sfx_potion, "legendary" to R.raw.sfx_legendary, "kill" to R.raw.sfx_kill,
+        "victory" to R.raw.sfx_victory, "levelup" to R.raw.sfx_levelup, "wind" to R.raw.sfx_wind, "omen" to R.raw.sfx_omen,
+        "miss" to R.raw.sfx_miss, "shutter" to R.raw.sfx_shutter, "blip" to R.raw.sfx_blip, "npc" to R.raw.sfx_npc,
+        "coins" to R.raw.sfx_coins, "hurt" to R.raw.sfx_hurt, "whoosh" to R.raw.sfx_whoosh, "steps" to R.raw.sfx_steps,
+        "ping" to R.raw.sfx_ping, "join" to R.raw.sfx_join, "windup" to R.raw.sfx_windup,
+        "ambient_battle" to R.raw.sfx_ambient_battle, "ambient_explore" to R.raw.sfx_ambient_explore,
+    ).mapValues { (_, res) -> pool.load(context, res, 1) }
     private val main = Handler(Looper.getMainLooper())
     private var ttsReady = false
     private var tts: TextToSpeech? = null
+    private var loopStream = 0
+    private var loopName = ""
+    @Volatile var muted = false
 
     init {
         tts = TextToSpeech(context) { status: Int ->
@@ -41,7 +38,6 @@ class Sfx(context: Context) {
             Log.i("Sfx", "tts ready=$ttsReady")
         }
     }
-    @Volatile var muted = false
 
     fun play(name: String, delayMs: Long = 0, volume: Float = 1f, rate: Float = 1f) {
         if (muted) return
@@ -50,16 +46,31 @@ class Sfx(context: Context) {
         else pool.play(id, volume, volume, 1, 0, rate)
     }
 
-    /** The monster speaks: low pitch, a touch slow. */
-    fun growl(text: String, delayMs: Long = 0) {
+    /** Ambient bed; switching to the same loop is a no-op. */
+    fun loop(name: String) {
+        if (name == loopName) return
+        stopLoop()
+        val id = ids[name] ?: return
+        loopName = name
+        if (muted) return
+        loopStream = pool.play(id, 0.5f, 0.5f, 0, -1, 1f)
+        if (loopStream == 0) main.postDelayed({ if (loopName == name) loopStream = pool.play(id, 0.5f, 0.5f, 0, -1, 1f) }, 800)
+    }
+
+    fun stopLoop() { if (loopStream != 0) pool.stop(loopStream); loopStream = 0; loopName = "" }
+
+    /** Any character speaks: pitch < 1 is a monster, > 1 a friendly NPC. */
+    fun speak(text: String, pitch: Float, rate: Float = 1f, delayMs: Long = 0) {
         if (muted || !ttsReady || text.isBlank()) return
         main.postDelayed({
-            tts?.setPitch(0.55f); tts?.setSpeechRate(0.95f)
-            tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "taunt")
+            tts?.setPitch(pitch); tts?.setSpeechRate(rate)
+            tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "voice")
         }, delayMs)
     }
 
-    /** The dungeon master narrates: normal pitch. */
+    fun growl(text: String, delayMs: Long = 0) = speak(text, 0.55f, 0.95f, delayMs)
+
+    /** The dungeon master narrates: normal pitch, queued after whatever is playing. */
     fun narrate(text: String, delayMs: Long = 0) {
         if (muted || !ttsReady || text.isBlank()) return
         main.postDelayed({
@@ -68,5 +79,5 @@ class Sfx(context: Context) {
         }, delayMs)
     }
 
-    fun release() { pool.release(); runCatching { tts?.shutdown() } }
+    fun release() { stopLoop(); pool.release(); runCatching { tts?.shutdown() } }
 }

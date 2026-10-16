@@ -79,3 +79,26 @@ save("sfx_levelup", mix(tone(0.5, 400, 1300, "tri", 0.45, 0.01, 0.1, 0.7, 0.2), 
 save("sfx_wind",    seq(tone(0.12, 60, 50, "sine", 0.9, 0.002, 0.05, 0.5, 0.06), tone(0.12, 60, 50, "sine", 0.9, 0.002, 0.05, 0.5, 0.06), tone(0.5, 300, 900, "tri", 0.4, 0.05, 0.1, 0.7, 0.25), gap=0.08))
 save("sfx_omen",    delay(tone(1.0, 180, 170, "sine", 0.4, 0.1, 0.3, 0.6, 0.4, vib=5), 0.2, 0.5, 3))
 save("sfx_miss",    tone(0.22, 420, 180, "tri", 0.4, 0.005, 0.05, 0.6, 0.1))
+
+# ---- second batch ----
+save("sfx_shutter", mix(noise(0.06, 0.6, 0.001, 0.01, 0.4, 0.04), tone(0.05, 1800, 900, "square", 0.25, 0.001, 0.01, 0.3, 0.03)))
+save("sfx_blip",    tone(0.08, 900, 1300, "sine", 0.35, 0.002, 0.02, 0.5, 0.04))
+save("sfx_npc",     delay(seq(tone(0.12, 659, None, "sine", 0.35, 0.005, 0.05, 0.7, 0.05), tone(0.12, 784, None, "sine", 0.35, 0.005, 0.05, 0.7, 0.05), tone(0.3, 1047, None, "sine", 0.35, 0.005, 0.08, 0.7, 0.2), gap=0.01), 0.15, 0.3, 2))
+save("sfx_coins",   seq(*[mix(tone(0.07, 2200 + i * 150, 2100 + i * 150, "sine", 0.3, 0.001, 0.02, 0.4, 0.04), tone(0.07, 3300, 3200, "sine", 0.15, 0.001, 0.02, 0.3, 0.04)) for i in range(5)], gap=0.03))
+save("sfx_hurt",    mix(noise(0.25, 0.5, 0.002, 0.05, 0.4, 0.18, lp=0.12), tone(0.25, 140, 70, "saw", 0.45, 0.002, 0.06, 0.4, 0.15)))
+save("sfx_whoosh",  noise(0.3, 0.45, 0.05, 0.08, 0.6, 0.15, lp=0.25))
+save("sfx_steps",   seq(tone(0.1, 70, 45, "sine", 0.9, 0.002, 0.04, 0.4, 0.05), tone(0.1, 70, 45, "sine", 0.9, 0.002, 0.04, 0.4, 0.05), tone(0.1, 70, 45, "sine", 0.9, 0.002, 0.04, 0.4, 0.05), gap=0.18))
+save("sfx_ping",    delay(tone(0.15, 1500, 1500, "sine", 0.35, 0.002, 0.05, 0.4, 0.1), 0.12, 0.4, 2))
+save("sfx_join",    seq(tone(0.1, 523, None, "tri", 0.35, 0.005, 0.03, 0.7, 0.05), tone(0.2, 784, None, "tri", 0.35, 0.005, 0.05, 0.7, 0.12), gap=0.01))
+save("sfx_windup",  seq(*[tone(0.05, 600 + i * 90, None, "square", 0.22, 0.001, 0.01, 0.6, 0.02) for i in range(8)], gap=0.07))
+# loops (seamless-ish: envelopes fully sustained, lengths whole cycles)
+def drone(dur, f, vol):
+    n = int(SR * dur); out = []
+    for i in range(n):
+        t = i / SR
+        v = (math.sin(2*math.pi*f*t) + 0.5*math.sin(2*math.pi*f*1.5*t) + 0.25*math.sin(2*math.pi*f*0.5*t)) / 1.75
+        v *= 1 + 0.15 * math.sin(2*math.pi*0.5*t)
+        out.append(v * vol)
+    return out
+save("sfx_ambient_battle",  mix(drone(4.0, 55, 0.18), noise(4.0, 0.05, 0.5, 0.5, 1.0, 0.5, lp=0.03)))
+save("sfx_ambient_explore", mix(drone(4.0, 110, 0.07), noise(4.0, 0.06, 0.5, 0.5, 1.0, 0.5, lp=0.02)))

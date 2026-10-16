@@ -4,7 +4,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 @Serializable
-enum class Phase { LOBBY, EXPLORE, BATTLE, VICTORY, DEFEAT }
+enum class Phase { LOBBY, EXPLORE, BATTLE, VICTORY, DEFEAT, NPC }
 
 @Serializable
 data class Monster(
@@ -24,7 +24,15 @@ data class Monster(
     val accessories: List<String> = emptyList(),
     /** Cut-out PNG of the real object (file name in the app cache); sent to clients as a stream. */
     val sprite: String = "",
+    /** NPCs reuse this shape: friendly, with a role and an offer instead of HP. */
+    val friendly: Boolean = false,
+    val role: String = "",
+    val offer: String = "",
 )
+
+/** A bound monster that fights beside its captor. */
+@Serializable
+data class Ally(val name: String, val emoji: String, val attack: String, val sprite: String = "")
 
 @Serializable
 data class Player(
@@ -42,7 +50,23 @@ data class Player(
     val potions: Int = 2,
     /** Once per raid: at 0 HP you get back up with a few HP instead of going down. */
     val secondWind: Boolean = true,
+    val epithet: String = "",
+    val companions: List<Ally> = emptyList(),
 )
+
+/** Powers unlock by level: new verbs the dungeon master honors, not bigger numbers. */
+fun powersFor(level: Int): List<String> = buildList {
+    if (level >= 2) add("Taunt"); if (level >= 3) add("Parley"); if (level >= 4) add("Bind"); if (level >= 5) add("Recast")
+}
+fun companionCapacity(level: Int): Int = if (level >= 6) 2 else if (level >= 4) 1 else 0
+fun powerUnlockedAt(level: Int): String? = when (level) {
+    2 -> "Taunt — shout a taunt to daze it and halve its next strike"
+    3 -> "Parley — talk a monster down; a great speech turns it into an NPC"
+    4 -> "Bind — after a kill, bind the fallen monster as a companion"
+    5 -> "Recast — declare a new weakness for the monster, once per fight"
+    6 -> "a second companion slot"
+    else -> null
+}
 
 /** One exchange's visual effects; the UI animates whenever seq changes. */
 @Serializable
@@ -61,6 +85,11 @@ data class Fx(
     val item: String = "",
     val levelUp: Boolean = false,
     val wind: Boolean = false,
+    /** Plain reply from the DM or an NPC (chat), spoken aloud. */
+    val say: String = "",
+    val xpSpent: Int = 0,
+    val power: String = "",
+    val companionHits: List<String> = emptyList(),
 )
 
 /** A nearby Wi-Fi/Bluetooth signal that Gemma turned into lore. */
@@ -85,6 +114,11 @@ data class GameState(
     val parries: List<String> = emptyList(),
     val omens: List<Omen> = emptyList(),
     val fx: Fx? = null,
+    /** Host-driven 0..100: how close the monster is to striking on its own. */
+    val windup: Int = 0,
+    /** Taunt landed: the monster's next strike is halved. */
+    val monsterDazed: Boolean = false,
+    val recastUsed: Boolean = false,
     /** Set when the strongest omen is menacing enough: the next spawn is its boss. */
     val bossLair: Omen? = null,
 ) {

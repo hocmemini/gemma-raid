@@ -89,6 +89,8 @@ import com.hocmemini.raid.camera.CameraPreview
 import com.hocmemini.raid.game.Monster
 import com.hocmemini.raid.game.Phase
 import com.hocmemini.raid.game.headingDelta
+import com.hocmemini.raid.game.companionCapacity
+import com.hocmemini.raid.game.powersFor
 import kotlinx.coroutines.delay
 import kotlin.math.abs
 
@@ -162,6 +164,7 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit) {
     var action by remember { mutableStateOf("") }
     var menuOpen by remember { mutableStateOf(false) }
     val narrate by vm.narrateAloud.collectAsState()
+    val debug by vm.debugHud.collectAsState()
     var confirmLeave by remember { mutableStateOf(false) }
 
     BackHandler { confirmLeave = true }
@@ -203,11 +206,11 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit) {
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         CameraPreview(Modifier.fillMaxSize()) { imageCapture = it }
         // long-press anywhere: re-pin the monster to where you're looking (compass drift fix)
-        if (isHost && state.phase == Phase.BATTLE) {
+        if (isHost && (state.phase == Phase.BATTLE || state.phase == Phase.NPC)) {
             Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures(onLongPress = { vm.reanchorMonster(chase = false) }) })
         }
 
-        if (monster != null && state.phase == Phase.BATTLE) {
+        if (monster != null && (state.phase == Phase.BATTLE || state.phase == Phase.NPC)) {
             MonsterOverlay(monster, delta = headingDelta(heading, vm.bearingToMonster(monster, self)), fx = state.fx, spriteVersion = spriteVersion)
         }
         FxLayer(state.fx, vm.selfId)
@@ -218,28 +221,37 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit) {
                 state.players.values.forEach { p ->
                     Column(Modifier.background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(8.dp)).padding(6.dp)) {
                         Text(
-                            "${p.name} · L${p.level}",
+                            "${p.name}${if (p.epithet.isNotBlank()) " ${p.epithet}" else ""} · L${p.level}",
                             color = if (p.hp > 0) Color.White else Color.Red,
                             fontWeight = if (p.id == vm.selfId) FontWeight.Bold else FontWeight.Normal, fontSize = 13.sp,
                         )
-                        Text("${p.hp}/${p.maxHp} hp · ${p.xp} xp · 🧪${p.potions}", color = Color.White.copy(alpha = 0.85f), fontSize = 12.sp)
+                        LinearProgressIndicator(progress = { p.hp.toFloat() / p.maxHp }, modifier = Modifier.width(120.dp).height(5.dp))
+                        Text("${p.hp}/${p.maxHp} · ${p.xp} xp · 🧪${p.potions}${if (p.companions.isNotEmpty()) " · " + p.companions.joinToString("") { it.emoji } else ""}", color = Color.White.copy(alpha = 0.85f), fontSize = 11.sp)
                         if (p.items.isNotEmpty()) Text("🎁 " + p.items.takeLast(3).joinToString(" · "), color = Color(0xFFFFD54F), fontSize = 11.sp)
                     }
                 }
             }
-            Text(
+            if (debug) Text(
                 buildString {
-                    append("${heading.toInt()}° · ${if (isHost) "host" else "player"} · kills ${state.kills}")
-                    if (state.phase == Phase.EXPLORE && isHost) append(" · $steps steps")
+                    append("${heading.toInt()}° · ${if (isHost) "host" else "player"} · kills ${state.kills} · $steps steps")
                     val e = if (isHost) envNow else state.env
                     if (e.isNotBlank()) append(" · $e")
+                    if (status.isNotBlank()) append(" · $status")
                     if (vm.selfId in state.parries) append(" · 🛡 guard up")
                     state.bossLair?.let { append(" · 👑 lair of ${it.name}") }
-                    if (status.isNotBlank()) append(" · $status")
                 },
                 color = Color.White.copy(alpha = 0.85f), fontSize = 12.sp,
                 modifier = Modifier.background(Color.Black.copy(alpha = 0.4f), RoundedCornerShape(6.dp)).padding(4.dp),
-            )
+            ) else {
+                val chips = buildList {
+                    if (vm.selfId in state.parries) add("🛡 guard up")
+                    if (state.monsterDazed && state.phase == Phase.BATTLE) add("😵 dazed")
+                    state.bossLair?.let { add("👑 lair of ${it.name}") }
+                    if (state.phase == Phase.EXPLORE && isHost && steps > 0) add("👣 $steps")
+                }
+                if (chips.isNotEmpty()) Text(chips.joinToString(" · "), color = Color.White.copy(alpha = 0.9f), fontSize = 12.sp,
+                    modifier = Modifier.background(Color.Black.copy(alpha = 0.4f), RoundedCornerShape(6.dp)).padding(4.dp))
+            }
         }
 
         // top-right menu
@@ -249,6 +261,8 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit) {
                 DropdownMenuItem(text = { Text("📊 Stats") }, onClick = { menuOpen = false; onStats() })
                 DropdownMenuItem(text = { Text(if (vm.sfx.muted) "🔈 Unmute" else "🔇 Mute") }, onClick = { vm.sfx.muted = !vm.sfx.muted; menuOpen = false })
                 DropdownMenuItem(text = { Text(if (narrate) "🗣 Stop narrating aloud" else "🗣 Narrate aloud") }, onClick = { vm.narrateAloud.value = !narrate; menuOpen = false })
+                DropdownMenuItem(text = { Text(if (debug) "🛠 Hide debug" else "🛠 Show debug") }, onClick = { vm.debugHud.value = !debug; menuOpen = false })
+                if (isHost && state.phase == Phase.NPC) DropdownMenuItem(text = { Text("👋 Leave conversation") }, onClick = { menuOpen = false; vm.leaveNpc() })
                 if (isHost && state.phase == Phase.BATTLE) DropdownMenuItem(text = { Text("🏳 Abandon fight, regroup") }, onClick = { menuOpen = false; vm.nextEncounter() })
                 DropdownMenuItem(text = { Text("🚪 Leave raid") }, onClick = { menuOpen = false; confirmLeave = true })
             }
@@ -259,64 +273,89 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit) {
             Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Color.Black.copy(alpha = 0.65f)).safeDrawingPadding().padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            state.log.takeLast(5).forEach { Text(it, color = Color.White, fontSize = 14.sp) }
+            state.log.takeLast(4).forEach { Text(it, color = Color.White, fontSize = 14.sp) }
             if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-            when (state.phase) {
-                Phase.BATTLE -> {
-                    val alive = (self?.hp ?: 1) > 0
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        OutlinedButton(
-                            { vm.drinkPotion() },
-                            enabled = (self?.potions ?: 0) > 0 && (self?.hp ?: 0) < (self?.maxHp ?: 1),
-                        ) { Text("🧪${self?.potions ?: 0}") }
-                        OutlinedTextField(
-                            action, { action = it }, modifier = Modifier.weight(1f), singleLine = true,
-                            placeholder = { Text(if (alive) "What do you do?" else "You're down — cheer from the floor") }, enabled = alive,
-                        )
-                        Button({ vm.act(action.trim()); action = "" }, enabled = !state.busy && action.isNotBlank() && alive) { Text("Act") }
+            else if (state.phase == Phase.BATTLE && state.windup > 0) {
+                LinearProgressIndicator(progress = { state.windup / 100f }, modifier = Modifier.fillMaxWidth().height(4.dp), color = if (state.windup > 70) Color(0xFFFF5252) else Color(0xFFFFA726))
+            }
+            val alive = (self?.hp ?: 1) > 0
+            val canTalk = state.phase == Phase.BATTLE || state.phase == Phase.EXPLORE || state.phase == Phase.NPC
+            if (canTalk) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton({ vm.drinkPotion() }, enabled = (self?.potions ?: 0) > 0 && (self?.hp ?: 0) < (self?.maxHp ?: 1)) { Text("🧪${self?.potions ?: 0}") }
+                    OutlinedTextField(
+                        action, { action = it }, modifier = Modifier.weight(1f), singleLine = true,
+                        placeholder = {
+                            Text(
+                                when {
+                                    state.phase == Phase.NPC -> "Say something to ${monster?.name ?: "them"}…"
+                                    state.phase == Phase.EXPLORE -> "Ask the dungeon master…"
+                                    !alive -> "You're down — cheer from the floor"
+                                    else -> "What do you do?"
+                                }
+                            )
+                        },
+                        enabled = alive || state.phase != Phase.BATTLE,
+                    )
+                    Button({ vm.act(action.trim()); action = "" }, enabled = !state.busy && action.isNotBlank() && (alive || state.phase != Phase.BATTLE)) {
+                        Text(if (state.phase == Phase.BATTLE) "Act" else "Say")
                     }
-                    // Hold-to-talk: the clip goes straight into Gemma 4 as audio, no speech-to-text.
-                    Box(
-                        Modifier.fillMaxWidth().height(52.dp)
-                            .background(if (recording) Color(0xFFD32F2F) else if (alive) Color(0xFF3949AB) else Color.DarkGray, RoundedCornerShape(12.dp))
-                            .pointerInput(alive, state.busy) {
-                                if (!alive) return@pointerInput
-                                detectTapGestures(onPress = { vm.voiceStart(); tryAwaitRelease(); vm.voiceStop() })
-                            },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(if (recording) "● listening… release to attack" else "🎤 hold to shout your move", color = Color.White, fontWeight = FontWeight.Bold)
-                    }
-                    Text(if (isHost) "swing to strike · double-twist to parry · long-press to re-pin" else "swing to strike · double-twist to parry", color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp, modifier = Modifier.align(Alignment.CenterHorizontally))
                 }
-                else -> if (isHost) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (state.phase == Phase.EXPLORE) {
-                            OutlinedButton({ vm.scanOmens() }, enabled = !state.busy) { Text("📡 Omens") }
-                            Button({ imageCapture?.let { vm.spawnFromCamera(it) } }, enabled = !state.busy && imageCapture != null, modifier = Modifier.weight(1f)) {
-                                Text(
-                                    when {
-                                        state.bossLair != null -> "👑 Spawn the BOSS"
-                                        steps >= 30 -> "Spawn (+${minOf(steps / 4, 50)} HP from $steps steps)"
-                                        else -> "Point at something · Spawn"
-                                    }
-                                )
-                            }
-                        } else {
-                            Button({ vm.nextEncounter() }, modifier = Modifier.weight(1f)) {
-                                Text(if (state.phase == Phase.VICTORY) "Loot taken · Explore for the next one" else "Regroup and explore")
-                            }
-                        }
-                    }
-                } else {
+                Box(
+                    Modifier.fillMaxWidth().height(52.dp)
+                        .background(if (recording) Color(0xFFD32F2F) else if (alive || state.phase != Phase.BATTLE) Color(0xFF3949AB) else Color.DarkGray, RoundedCornerShape(12.dp))
+                        .pointerInput(alive, state.busy, state.phase) {
+                            if (!alive && state.phase == Phase.BATTLE) return@pointerInput
+                            detectTapGestures(onPress = { vm.voiceStart(); tryAwaitRelease(); vm.voiceStop() })
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
                     Text(
-                        when (state.phase) {
-                            Phase.VICTORY -> "Victory! Waiting for the host to explore…"
-                            Phase.DEFEAT -> "Wiped. Waiting for the host to regroup…"
-                            else -> "Waiting for the host to find a monster…"
-                        }, color = Color.White,
+                        when {
+                            recording -> "● listening… release to send"
+                            state.phase == Phase.BATTLE -> "🎤 hold to shout your move"
+                            state.phase == Phase.NPC -> "🎤 hold to talk"
+                            else -> "🎤 hold to ask the dungeon master"
+                        }, color = Color.White, fontWeight = FontWeight.Bold,
                     )
                 }
+            }
+            when (state.phase) {
+                Phase.BATTLE -> {
+                    val powers = powersFor(self?.level ?: 1)
+                    Text(
+                        (if (isHost) "swing to strike · twist to parry · long-press to re-pin" else "swing to strike · twist to parry") +
+                            (if (powers.isNotEmpty()) " · powers: ${powers.joinToString(", ")}" else ""),
+                        color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp, modifier = Modifier.align(Alignment.CenterHorizontally),
+                    )
+                }
+                Phase.NPC -> if (isHost) OutlinedButton({ vm.leaveNpc() }, modifier = Modifier.fillMaxWidth()) { Text("👋 Leave ${monster?.name ?: ""}") }
+                Phase.EXPLORE -> if (isHost) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton({ vm.scanOmens() }, enabled = !state.busy) { Text("📡") }
+                        OutlinedButton({ imageCapture?.let { vm.meetFromCamera(it) } }, enabled = !state.busy && imageCapture != null) { Text("🤝 Meet") }
+                        Button({ imageCapture?.let { vm.spawnFromCamera(it) } }, enabled = !state.busy && imageCapture != null, modifier = Modifier.weight(1f)) {
+                            Text(
+                                when {
+                                    state.bossLair != null -> "👑 Spawn the BOSS"
+                                    steps >= 30 -> "⚔ Spawn (+${minOf(steps / 4, 50)} HP)"
+                                    else -> "⚔ Spawn"
+                                }
+                            )
+                        }
+                    }
+                } else Text("Waiting for the host to find something…", color = Color.White)
+                Phase.VICTORY, Phase.DEFEAT -> if (isHost) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (state.phase == Phase.VICTORY && self != null && companionCapacity(self.level) > self.companions.size) {
+                            OutlinedButton({ vm.bindFallen() }) { Text("🐾 Bind it") }
+                        }
+                        Button({ vm.nextEncounter() }, modifier = Modifier.weight(1f)) {
+                            Text(if (state.phase == Phase.VICTORY) "Explore for the next one" else "Regroup and explore")
+                        }
+                    }
+                } else Text(if (state.phase == Phase.VICTORY) "Victory! Waiting for the host…" else "Wiped. Waiting for the host…", color = Color.White)
+                else -> {}
             }
         }
     }
@@ -348,11 +387,15 @@ private fun MonsterOverlay(m: Monster, delta: Float, fx: Fx?, spriteVersion: Int
     val hop = remember { Animatable(0f) }
     val death = remember { Animatable(0f) }
     val bubble = remember { Animatable(0f) }
+    val ringAlpha = remember { Animatable(1f) }
     var bubbleText by remember { mutableStateOf("") }
+    val ringColor = if (m.friendly) Color(0xFF69F0AE) else Color(0xFFFF5252)
 
+    LaunchedEffect(m.name) { ringAlpha.snapTo(1f); kotlinx.coroutines.delay(2500); ringAlpha.animateTo(0.22f, tween(1200)) }
     LaunchedEffect(fx?.seq) {
         val f = fx ?: return@LaunchedEffect
-        if (f.taunt.isNotBlank()) {
+        if (f.taunt.isNotBlank() || f.say.isNotBlank()) {
+            bubbleText = f.taunt.ifBlank { f.say }
             bubbleText = f.taunt
             launch { hop.animateTo(1f, tween(140)); hop.animateTo(0f, spring(dampingRatio = Spring.DampingRatioMediumBouncy)) }
             launch {
@@ -404,18 +447,14 @@ private fun MonsterOverlay(m: Monster, delta: Float, fx: Fx?, spriteVersion: Int
             ) {
                 Canvas(Modifier.size(ringDp)) {
                     val r = size.minDimension / 2
+                    // soft ground shadow under the creature
+                    drawOval(Color.Black.copy(alpha = 0.35f * (1f - fly.value)), topLeft = Offset(center.x - r * 0.55f, center.y + r * 0.62f), size = androidx.compose.ui.geometry.Size(r * 1.1f, r * 0.22f))
                     drawCircle(
-                        color = Color(0xFFFF5252).copy(alpha = 0.9f), radius = r * 0.98f,
-                        style = Stroke(width = 6f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(40f, 24f), phase = pulse * 64f)),
+                        color = ringColor.copy(alpha = 0.9f * ringAlpha.value), radius = r * 0.98f,
+                        style = Stroke(width = 4f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(40f, 24f), phase = pulse * 64f)),
                     )
-                    val t = r * 0.18f
-                    listOf(-1f to -1f, 1f to -1f, -1f to 1f, 1f to 1f).forEach { (sx, sy) ->
-                        val cx = center.x + sx * r * 1.08f; val cy = center.y + sy * r * 1.08f
-                        drawLine(Color.White, Offset(cx, cy), Offset(cx - sx * t, cy), strokeWidth = 5f)
-                        drawLine(Color.White, Offset(cx, cy), Offset(cx, cy - sy * t), strokeWidth = 5f)
-                    }
                     if (hitFlash.value > 0f) drawCircle(Color.White.copy(alpha = hitFlash.value), radius = r * (1.0f + (1f - hitFlash.value) * 0.4f), style = Stroke(width = 14f * hitFlash.value + 2f))
-                    drawCircle(Color(0xFFFF5252).copy(alpha = (1f - pulse) * 0.5f), radius = r * (1f + pulse * 0.35f), style = Stroke(width = 3f))
+                    if (ringAlpha.value > 0.5f) drawCircle(ringColor.copy(alpha = (1f - pulse) * 0.5f * ringAlpha.value), radius = r * (1f + pulse * 0.35f), style = Stroke(width = 3f))
                 }
                 val feats = m.accessories
                 val wob = sin(dance * 2f * Math.PI.toFloat())
@@ -472,8 +511,11 @@ private fun MonsterOverlay(m: Monster, delta: Float, fx: Fx?, spriteVersion: Int
             ) {
                 Card { Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("${m.emoji} ${m.name}", fontSize = 17.sp, fontWeight = FontWeight.Black)
-                    LinearProgressIndicator(progress = { m.hp.toFloat() / m.maxHp }, modifier = Modifier.width(200.dp).height(7.dp))
-                    Text("${m.hp}/${m.maxHp} · weak to ${m.weakness}", fontSize = 11.sp)
+                    if (m.friendly) Text("${m.role} · ${m.offer}", fontSize = 11.sp)
+                    else {
+                        LinearProgressIndicator(progress = { m.hp.toFloat() / m.maxHp }, modifier = Modifier.width(200.dp).height(7.dp))
+                        Text("${m.hp}/${m.maxHp} · weak to ${m.weakness}", fontSize = 11.sp)
+                    }
                 } }
             }
             // speech bubble, upper-right of the ring
