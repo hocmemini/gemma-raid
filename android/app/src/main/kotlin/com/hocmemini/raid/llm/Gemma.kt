@@ -10,6 +10,9 @@ import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.LogSeverity
 import com.google.ai.edge.litertlm.Message
+import com.google.ai.edge.litertlm.ResponseFormat
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 import com.google.ai.edge.litertlm.SamplerConfig
 import com.google.ai.edge.litertlm.ThinkingConfig
 import com.google.ai.edge.litertlm.Tool
@@ -210,6 +213,35 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
         return c
     }
 
+    private val lenientJson = Json { ignoreUnknownKeys = true; isLenient = true; coerceInputValues = true }
+
+    @Serializable private data class MonsterJson(val name: String = "", val hp: Int = 30, val attacks: String = "", val weakness: String = "", val flavor: String = "", val emoji: String = "👾", val accessories: String = "", val taunt: String = "")
+    @Serializable private data class NpcJson(val name: String = "", val role: String = "oddball", val emoji: String = "🙂", val accessories: String = "", val greeting: String = "", val offer: String = "")
+
+    /**
+     * Structured output instead of a tool call: a throwaway conversation with constrained JSON decoding,
+     * so the model cannot answer "please provide an image" or slip a quote token. Returns the JSON text.
+     */
+    private fun askJson(contents: Contents, schema: String, maxTokens: Int = 320): String {
+        val c = engine!!.createConversation(
+            ConversationConfig(
+                systemInstruction = Contents.of(SYSTEM_PROMPT),
+                samplerConfig = SamplerConfig(topK = 40, topP = 0.95, temperature = 0.9),
+                thinkingConfig = ThinkingConfig(false, 0),
+                maxOutputToken = maxTokens,
+                enableResponseFormat = true,
+            )
+        )
+        return try {
+            c.sendMessage(contents, responseFormat = ResponseFormat.json(schema)).plainText()
+        } finally { c.close() }
+    }
+
+    private fun extractJson(text: String): String {
+        val a = text.indexOf('{'); val b = text.lastIndexOf('}')
+        return if (a >= 0 && b > a) text.substring(a, b + 1) else text
+    }
+
     /**
      * Send on the current conversation. If LiteRT-LM's strict tool-call parser rejects the model's
      * output (a slipped quote token is enough), recover the arguments leniently from the raw response
@@ -233,25 +265,38 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
         }
     }
 
-    /** Photo of a real object -> monster via the spawn_monster tool. Starts a fresh conversation. */
+    /** Photo of a real object -> monster. Constrained JSON first (reliable); the tool path only as a fallback. Starts the battle conversation. */
     suspend fun spawn(imagePath: String, stepsWalked: Int, environment: String, bossLair: String?, reputation: String): Pair<SpawnedMonster?, String> = withContext(Dispatchers.IO) {
         tools.spawned = null
-        newConversation()
         val prompt = buildString {
-            append(SPAWN_PROMPT)
-            if (stepsWalked > 30) append(" The players walked $stepsWalked steps to find it, so make it bigger and nastier than usual.")
-            if (environment.isNotBlank()) append(" Conditions: $environment. Let that shape the monster.")
-            if (reputation.isNotBlank()) append(" The players are known as: $reputation; the monster has heard of them.")
-            if (bossLair != null) append(" IMPORTANT: this place is the lair of $bossLair. The monster is its champion or the entity itself: make it a BOSS, hp 60 to 80, more menacing than usual.")
+            append("Look at this photo. Pick the most prominent object or feature and turn it into a monster. ")
+            if (stepsWalked > 30) append("The players walked $stepsWalked steps to find it, so make it bigger and nastier than usual. ")
+            if (environment.isNotBlank()) append("Conditions: $environment. Let that shape the monster. ")
+            if (reputation.isNotBlank()) append("The players are known as: $reputation; the monster has heard of them. ")
+            if (bossLair != null) append("IMPORTANT: this place is the lair of $bossLair. The monster is its champion or the entity itself: make it a BOSS, hp 60 to 80, more menacing than usual. ")
+            append("Answer as JSON: name (short dramatic, from the object), hp (20-60, bigger objects higher), attacks (2-3 names, comma separated), weakness (one short phrase players could plausibly act on), flavor (1-2 vivid sentences), emoji (one), accessories (2-3 emoji separated by spaces: eyes, horns, a weapon), taunt (what it shouts, ALL CAPS, under 8 words).")
         }
         val t0 = System.currentTimeMillis()
-        var reply = send(Contents.of(Content.ImageFile(imagePath), Content.Text(prompt)))
-        if (tools.spawned == null) {
-            Log.w(TAG, "no spawn_monster call; retrying once"); retries++
-            reply = send(Contents.of("You must call the spawn_monster tool for the object in the photo now, then say one short line."))
+        var line = ""
+        val viaJson = runCatching {
+            val raw = askJson(Contents.of(Content.ImageFile(imagePath), Content.Text(prompt)), MONSTER_SCHEMA)
+            Log.i(TAG, "spawn json: ${raw.take(300)}")
+            val j = lenientJson.decodeFromString(MonsterJson.serializer(), extractJson(raw))
+            if (j.name.isBlank()) null else SpawnedMonster(j.name.take(40), j.hp.coerceIn(10, 80), splitList(j.attacks).ifEmpty { listOf("Lunge") }, j.weakness.ifBlank { "a clever idea" }, j.flavor, j.emoji.take(4).ifBlank { "👾" }, splitEmoji(j.accessories), j.taunt.take(60))
+        }.onFailure { Log.w(TAG, "spawn json failed: ${it.message?.take(160)}") }.getOrNull()
+        var result = viaJson
+        if (result == null) {
+            newConversation()
+            var reply = send(Contents.of(Content.ImageFile(imagePath), Content.Text("$prompt Call spawn_monster with those fields.")))
+            if (tools.spawned == null) { retries++; Log.w(TAG, "no spawn_monster call (model said: ${reply.plainText().take(120)}); retrying once"); reply = send(Contents.of("You must call the spawn_monster tool for the object in the photo now, then say one short line.")) }
+            result = tools.spawned; line = reply.plainText()
         }
-        Log.i(TAG, "spawn took ${System.currentTimeMillis() - t0} ms; tool=${tools.spawned != null}")
-        tools.spawned to reply.plainText()
+        // battle conversation: the monster's sheet rides in the system instruction so resolve_action knows it
+        if (result != null) {
+            newConversation(" The current monster is ${result.name} (HP ${result.hp}; attacks: ${result.attacks.joinToString()}; weak to ${result.weakness}). ${result.flavor}")
+        }
+        Log.i(TAG, "spawn took ${System.currentTimeMillis() - t0} ms; ok=${result != null}; json=${viaJson != null}")
+        result to line
     }
 
     /**
@@ -290,27 +335,38 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
         var reply = if (audioWav != null) send(Contents.of(Content.AudioBytes(audioWav), Content.Text(situation)))
                     else send(Contents.of(situation))
         if (tools.resolved == null) {
-            Log.w(TAG, "no resolve_action call; retrying once"); retries++
+            Log.w(TAG, "no resolve_action call (model said: ${reply.plainText().take(120)}); retrying once"); retries++
             reply = send(Contents.of("You must call the resolve_action tool for that action now, then reply in one sentence."))
         }
         Log.i(TAG, "resolve took ${System.currentTimeMillis() - t0} ms; tool=${tools.resolved != null}; audio=${audioWav != null}; potion=${tools.potionRequested}; item=${tools.itemUsed}")
         tools.resolved?.copy(drankPotion = tools.potionRequested, usedItem = tools.itemUsed) to reply.plainText()
     }
 
-    /** Photo -> friendly NPC via spawn_npc. Fresh conversation that then carries the NPC's persona. */
+    /** Photo -> friendly NPC. Constrained JSON first; the NPC's persona then rides in a fresh tools conversation. */
     suspend fun meet(imagePath: String, environment: String): Pair<SpawnedNpc?, String> = withContext(Dispatchers.IO) {
         tools.npc = null
-        newConversation()
         val prompt = buildString {
             append("Look at this photo. Turn the most prominent object into a friendly character the players can talk to: a merchant selling odd wares for XP, a sage with lore and tips, a healer, or an oddball. ")
             if (environment.isNotBlank()) append("Conditions: $environment. ")
-            append("Call spawn_npc, then greet the players in character in one line.")
+            append("Answer as JSON: name, role (merchant|sage|healer|oddball), emoji (one), accessories (2-3 emoji separated by spaces), greeting (under 15 words), offer (one short line of what they offer).")
         }
         val t0 = System.currentTimeMillis()
-        var reply = send(Contents.of(Content.ImageFile(imagePath), Content.Text(prompt)))
-        if (tools.npc == null) { retries++; reply = send(Contents.of("You must call the spawn_npc tool for the object in the photo now.")) }
-        Log.i(TAG, "meet took ${System.currentTimeMillis() - t0} ms; tool=${tools.npc != null}")
-        tools.npc to reply.plainText()
+        val viaJson = runCatching {
+            val raw = askJson(Contents.of(Content.ImageFile(imagePath), Content.Text(prompt)), NPC_SCHEMA)
+            Log.i(TAG, "meet json: ${raw.take(300)}")
+            val j = lenientJson.decodeFromString(NpcJson.serializer(), extractJson(raw))
+            if (j.name.isBlank()) null else SpawnedNpc(j.name.take(40), j.role.lowercase().take(12), j.emoji.take(4).ifBlank { "🙂" }, splitEmoji(j.accessories), j.greeting.take(90), j.offer.take(90))
+        }.onFailure { Log.w(TAG, "meet json failed: ${it.message?.take(160)}") }.getOrNull()
+        var result = viaJson; var line = ""
+        if (result == null) {
+            newConversation()
+            var reply = send(Contents.of(Content.ImageFile(imagePath), Content.Text("$prompt Call spawn_npc with those fields.")))
+            if (tools.npc == null) { retries++; reply = send(Contents.of("You must call the spawn_npc tool for the object in the photo now.")) }
+            result = tools.npc; line = reply.plainText()
+        }
+        if (result != null) newConversation(" You are now ${result.name}, the ${result.role}: ${result.offer}. Stay in character.")
+        Log.i(TAG, "meet took ${System.currentTimeMillis() - t0} ms; ok=${result != null}; json=${viaJson != null}")
+        result to line
     }
 
     /** Chat with the current NPC (continues the conversation started by meet). */
@@ -397,6 +453,8 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
     companion object {
         private const val TAG = "Gemma"
         private const val MAX_TURNS_PER_CONVERSATION = 8
+        const val MONSTER_SCHEMA = """{"type":"object","properties":{"name":{"type":"string"},"hp":{"type":"integer"},"attacks":{"type":"string"},"weakness":{"type":"string"},"flavor":{"type":"string"},"emoji":{"type":"string"},"accessories":{"type":"string"},"taunt":{"type":"string"}},"required":["name","hp","attacks","weakness","flavor","emoji","accessories","taunt"]}"""
+        const val NPC_SCHEMA = """{"type":"object","properties":{"name":{"type":"string"},"role":{"type":"string"},"emoji":{"type":"string"},"accessories":{"type":"string"},"greeting":{"type":"string"},"offer":{"type":"string"}},"required":["name","role","emoji","accessories","greeting","offer"]}"""
         const val SYSTEM_PROMPT = """You are the dungeon master of a co-op augmented-reality RPG played in a real room.
 Real objects seen through the phone camera become monsters. Be vivid, funny and fast. Keep every reply under 40 words.
 Always use the provided tools to report game effects; never invent numbers in prose.

@@ -104,16 +104,18 @@ fun RaidApp(vm: GameSession) {
     val role by vm.role.collectAsState()
     var showStats by remember { mutableStateOf(false) }
     var showJournal by remember { mutableStateOf(false) }
+    var showModel by remember { mutableStateOf(false) }
     when {
+        showModel -> { BackHandler { showModel = false }; ModelScreen(vm) { showModel = false } }
         showStats -> { BackHandler { showStats = false }; StatsScreen(vm) { showStats = false } }
         showJournal -> { BackHandler { showJournal = false }; JournalScreen(vm) { showJournal = false } }
-        role == GameSession.Role.NONE -> LobbyScreen(vm, onStats = { showStats = true }, onJournal = { showJournal = true })
-        else -> PlayScreen(vm, onStats = { showStats = true }, onJournal = { showJournal = true })
+        role == GameSession.Role.NONE -> LobbyScreen(vm, onStats = { showStats = true }, onJournal = { showJournal = true }, onModel = { showModel = true })
+        else -> PlayScreen(vm, onStats = { showStats = true }, onJournal = { showJournal = true }, onModel = { showModel = true })
     }
 }
 
 @Composable
-fun LobbyScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit) {
+fun LobbyScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit, onModel: () -> Unit) {
     var name by remember { mutableStateOf(vm.savedName) }
     val modelPresent by vm.modelPresent.collectAsState()
     val gemmaStatus by vm.gemmaStatus.collectAsState()
@@ -124,7 +126,6 @@ fun LobbyScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit) {
 
     // Hosting needs the model: auto-pick the strongest file and fastest backend, load immediately.
     LaunchedEffect(modelPresent) { if (modelPresent) vm.loadModel() }
-    var advanced by remember { mutableStateOf(false) }
 
     Column(
         Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp).verticalScroll(rememberScrollState()),
@@ -146,20 +147,10 @@ fun LobbyScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit) {
                             else -> "🧠 no model on this phone yet"
                         }, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f),
                     )
-                    TextButton({ advanced = !advanced }) { Text(if (advanced) "Less" else "Advanced") }
+                    TextButton(onModel) { Text("Change") }
                 }
                 Text(vm.modelInfo, style = MaterialTheme.typography.bodySmall, color = Dungeon.parchment.copy(alpha = 0.8f))
                 if (gemmaLoading) LinearProgressIndicator(Modifier.fillMaxWidth())
-                if (advanced) {
-                    Text("Files: " + vm.models.candidates().joinToString { "${it.name} (${it.length() shr 20} MB)" }.ifBlank { "none" }, style = MaterialTheme.typography.bodySmall)
-                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton({ picker.launch(arrayOf("*/*")) }, enabled = !gemmaLoading) { Text("Pick file") }
-                        OutlinedButton({ vm.downloadModel("E2B") }, enabled = !gemmaLoading) { Text("Get E2B · 2.6 GB") }
-                        OutlinedButton({ vm.downloadModel("E4B") }, enabled = !gemmaLoading) { Text("Get E4B · 3.7 GB") }
-                    }
-                    if (!gemmaReady) TextButton({ vm.loadModel(forceCpu = true) }, enabled = modelPresent && !gemmaLoading) { Text("Force CPU (debug)") }
-                    Text("This phone: ${vm.models.soc}, ${"%.0f".format(vm.models.totalGb)} GB RAM. NPU builds exist for Tensor G5/G6 only; everything else runs on the GPU, and CPU is the automatic fallback if the GPU init fails.", style = MaterialTheme.typography.bodySmall)
-                }
             }
         }
 
@@ -172,13 +163,14 @@ fun LobbyScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
             TextButton(onStats) { Text("📊 Stats") }
             TextButton(onJournal) { Text("📖 Journal") }
+            TextButton(onModel) { Text("🧠 Brain") }
         }
         Text(status, style = MaterialTheme.typography.bodySmall)
     }
 }
 
 @Composable
-fun PlayScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit) {
+fun PlayScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit, onModel: () -> Unit) {
     val textScale by vm.textScale.collectAsState()
     val state by vm.state.collectAsState()
     val role by vm.role.collectAsState()
@@ -322,6 +314,7 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit) {
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                 DropdownMenuItem(text = { Text("🎒 Inventory") }, onClick = { menuOpen = false; showBag = true })
                 DropdownMenuItem(text = { Text("📖 Journal") }, onClick = { menuOpen = false; onJournal() })
+                DropdownMenuItem(text = { Text("🧠 Brain (model)") }, onClick = { menuOpen = false; onModel() })
                 DropdownMenuItem(text = { Text("Aa Text size (${(textScale * 100).toInt()}%)") }, onClick = { vm.cycleTextScale() })
                 DropdownMenuItem(text = { Text("📊 Stats") }, onClick = { menuOpen = false; onStats() })
                 DropdownMenuItem(text = { Text(if (vm.sfx.muted) "🔈 Unmute" else "🔇 Mute") }, onClick = { vm.sfx.muted = !vm.sfx.muted; menuOpen = false })

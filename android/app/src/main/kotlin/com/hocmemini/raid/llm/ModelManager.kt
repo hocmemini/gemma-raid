@@ -32,11 +32,18 @@ class ModelManager(private val context: Context) {
         return files.firstOrNull { f -> val n = f.name.lowercase(); n.contains("_google_tensor_") && tag.isNotBlank() && n.contains(tag.substringAfter("tensor_", tag)) }
     }
 
-    fun best(forceCpu: Boolean = false): Choice? {
+    /** What this phone should run: E4B only with plenty of RAM; pace matters more than prose. */
+    fun recommendedVariant(): String = if (totalGb >= 14f) "E4B" else "E2B"
+
+    fun best(forceCpu: Boolean = false, preferVariant: String? = null): Choice? {
         val files = candidates()
         if (files.isEmpty()) return null
+        if (preferVariant != null) files.firstOrNull { it.name.contains(preferVariant, true) && !it.name.contains("_") }?.let { f ->
+            val label = "Gemma 4 $preferVariant"
+            return if (forceCpu) Choice(f, label, Backend.CPU(), "CPU", "forced") else Choice(f, label, Backend.GPU(), "GPU", "your choice")
+        }
         val npu = npuFileFor(files)
-        val wantBig = totalGb >= 11f
+        val wantBig = totalGb >= 14f
         val generic = files.filterNot { it.name.contains("_") && it.name.contains("Tensor", true) || it.name.contains("qualcomm", true) || it.name.contains("intel", true) }
         val e4b = generic.firstOrNull { it.name.contains("E4B", true) }
         val e2b = generic.firstOrNull { it.name.contains("E2B", true) } ?: generic.maxByOrNull { it.length() }
@@ -68,6 +75,22 @@ class ModelManager(private val context: Context) {
     fun downloadUrl(variant: String) = when (variant) {
         "E4B" -> "https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it.litertlm"
         else -> "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm"
+    }
+
+    fun has(variant: String): Boolean = candidates().any { it.name.contains(variant, true) }
+
+    /** Cancel every download this app started (and delete partial files). */
+    fun cancelDownloads(): Int {
+        val dm = context.getSystemService(DownloadManager::class.java)
+        val ids = mutableListOf<Long>()
+        dm.query(DownloadManager.Query())?.use { c ->
+            while (c.moveToNext()) {
+                val st = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
+                if (st == DownloadManager.STATUS_RUNNING || st == DownloadManager.STATUS_PENDING || st == DownloadManager.STATUS_PAUSED) ids += c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_ID))
+            }
+        }
+        if (ids.isNotEmpty()) dm.remove(*ids.toLongArray())
+        return ids.size
     }
 
     fun startDownload(variant: String): Long {

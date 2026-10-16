@@ -116,11 +116,26 @@ class GameSession(private val app: Application) {
     private var lastSlain: Monster? = null
 
     val models = ModelManager(app)
-    val modelChoice = MutableStateFlow(models.best())
+    /** User's explicit pick ("E2B"/"E4B"), else the recommendation. */
+    val selectedModel = MutableStateFlow<String?>(prefs.getString("model", null))
+    val modelChoice = MutableStateFlow(models.best(preferVariant = prefs.getString("model", null)))
     val modelPresent = MutableStateFlow(modelChoice.value != null)
     val modelInfo: String get() = models.why(modelChoice.value)
     val modelFile: File get() = modelChoice.value?.file ?: File(app.filesDir, MODEL_NAME)
-    private fun rescanModels() { modelChoice.value = models.best(); modelPresent.value = modelChoice.value != null }
+    private fun rescanModels() { modelChoice.value = models.best(preferVariant = selectedModel.value); modelPresent.value = modelChoice.value != null }
+
+    fun selectModel(variant: String) {
+        selectedModel.value = variant; prefs.edit().putString("model", variant).apply()
+        rescanModels()
+        if (gemmaReady.value) { gemma?.close(); gemma = null; gemmaReady.value = false }
+        loadModel()
+    }
+
+    fun deleteModel(variant: String) {
+        models.candidates().filter { it.name.contains(variant, true) }.forEach { it.delete() }
+        if (selectedModel.value == variant) { selectedModel.value = null; prefs.edit().remove("model").apply() }
+        rescanModels()
+    }
     private val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     /** Your character (xp, level, items, potions, epithet, companions) survives between raids. */
@@ -129,6 +144,8 @@ class GameSession(private val app: Application) {
     fun resetCharacter() { prefs.edit().remove("character").apply() }
 
     init {
+        // A stray download of a model we already have (earlier builds allowed it) is just wasted data.
+        runCatching { if (models.has("E2B") || models.has("E4B")) { val n = models.cancelDownloads(); if (n > 0) gemmaStatus.value = "cancelled $n stray download(s)" } }
         textScale.value = prefs.getFloat("textScale", 1f)
         journal.value = runCatching { prefs.getString("journal", null)?.let { json.decodeFromString(kotlinx.serialization.builtins.ListSerializer(kotlinx.serialization.serializer<String>()), it) } }.getOrNull() ?: emptyList()
     }
@@ -169,7 +186,7 @@ class GameSession(private val app: Application) {
     fun loadModel(forceCpu: Boolean = false) {
         if (gemmaReady.value || gemmaLoading.value) return
         rescanModels()
-        val choice = models.best(forceCpu) ?: run { gemmaStatus.value = "no model file on this phone"; return }
+        val choice = models.best(forceCpu, selectedModel.value) ?: run { gemmaStatus.value = "no model file on this phone"; return }
         gemmaLoading.value = true
         scope.launch {
             val ok = runCatching {
@@ -180,7 +197,7 @@ class GameSession(private val app: Application) {
             if (!ok && !forceCpu) {
                 gemmaStatus.value = "${choice.backendName} init failed — falling back to CPU"
                 runCatching {
-                    val cpu = models.best(forceCpu = true)!!
+                    val cpu = models.best(forceCpu = true, preferVariant = selectedModel.value)!!
                     val g = Gemma(cpu.file.absolutePath, cpu.backend, "CPU")
                     g.load { gemmaStatus.value = it }
                     gemma = g; gemmaReady.value = true
@@ -191,15 +208,26 @@ class GameSession(private val app: Application) {
     }
 
     /** Fetch a model straight from Hugging Face on the phone (internet needed once). */
+    val downloading = MutableStateFlow(false)
+
+    fun cancelDownload() {
+        val n = models.cancelDownloads()
+        downloading.value = false; gemmaLoading.value = false
+        gemmaStatus.value = if (n > 0) "download cancelled" else "nothing to cancel"
+        rescanModels()
+    }
+
     fun downloadModel(variant: String) = scope.launch {
         if (gemmaLoading.value) return@launch
+        if (models.has(variant)) { gemmaStatus.value = "Gemma 4 $variant is already on this phone"; return@launch }
+        downloading.value = true
         gemmaLoading.value = true
         gemmaStatus.value = "starting download of Gemma 4 $variant…"
         val ok = runCatching {
             val id = models.startDownload(variant)
             models.awaitDownload(id) { gemmaStatus.value = it }
         }.getOrDefault(false)
-        gemmaLoading.value = false
+        gemmaLoading.value = false; downloading.value = false
         if (ok) { gemmaStatus.value = "downloaded Gemma 4 $variant"; rescanModels(); loadModel() }
     }
 
