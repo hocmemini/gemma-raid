@@ -20,6 +20,12 @@ adjudicates every move through function calls so the game state stays determinis
 | Audio | Gemma 4 E2B takes 16 kHz WAV natively, so hold-to-talk actions skip speech-to-text entirely |
 | Sensors as mechanics | swing the phone to strike (linear acceleration); Pixel double-twist to parry; shout volume = battle cry; steps walked since the last fight grow the next monster; ambient light, barometric floors and gyro-die temperature are described to Gemma at spawn |
 | Omens | Wi-Fi SSIDs and named BLE devices nearby → `write_omens(names, lores, threats)`; the strongest menacing signal becomes a boss lair for the next spawn. Offices are haunted, parks are wild country |
+| Wit scoring | `resolve_action` rates each action's style 1–5; 4 is ×1.5, 5 is LEGENDARY ×2. A TSA liquid check on a bag is a legendary blow |
+| Voice items | `drink_potion` and `use_item(name)` tools: say "I chug a potion" or invoke loot by name while shouting, Gemma calls the tool |
+| AR augmentation | lock-on ring on the object, Gemma-chosen emoji features pinned around it (eyes, horns, a weapon that swings at you), comic speech bubbles with the monster's taunts |
+| Sound | 13 synthesized chiptune effects (`scripts/gen-sfx.py`), monster taunts spoken by Android TTS at low pitch, optional narrate-aloud |
+| Survivability | solo mercy (60% incoming), potions, one second wind per raid, levels raise max HP |
+| Stats | persisted campaign/combat/playstyle/Gemma-latency stats and a hall of monsters |
 
 Every game-affecting number comes out of a tool call, never parsed from prose. Open weights are the whole game: nothing works without the model on the phone.
 
@@ -52,6 +58,9 @@ Tested on Pixel 8 Pro (Android 17). Any Android 12+ phone with Bluetooth can joi
 - [x] loot, XP, levels; step-scaled monsters; haptics
 - [x] swing / twist / shout / light / barometer mechanics
 - [x] Wi-Fi + BLE omens and boss lairs
+- [x] style-scored damage, potions, second wind, voice-activated items
+- [x] animated AR augmentation with speech bubbles; chiptune SFX and TTS monster voice
+- [x] back navigation, HUD menu, stats screen
 - [ ] optional online mode: `gemma-4-26b-a4b-it` via Gemini API for richer narration
 
 ## License
