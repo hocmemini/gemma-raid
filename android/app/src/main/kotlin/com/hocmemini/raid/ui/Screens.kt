@@ -250,7 +250,7 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit, onMo
                 delay(500)
                 val d = abs(headingDelta(vm.compass.heading.value, vm.bearingToMonster(monster, vm.state.value.players[vm.selfId])))
                 val now = System.currentTimeMillis()
-                if (d > 60f) { if (awaySince == 0L) awaySince = now; if (now - awaySince > 4000 && !vm.state.value.busy) { vm.reanchorMonster(chase = true); return@LaunchedEffect } }
+                if (d > 60f) { if (awaySince == 0L) awaySince = now; if (now - awaySince > 4000 && !vm.state.value.busy) { vm.tryEscape(fromChase = true); return@LaunchedEffect } }
                 else awaySince = 0L
             }
         }
@@ -361,12 +361,12 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit, onMo
                 val chips = when (state.phase) {
                     Phase.NPC -> listOf("What's for sale?", "Heal me", "Tell me a secret", "Anything for free?")
                     Phase.EXPLORE -> listOf("Any tips?", "What is this place?", "Who are you?")
-                    else -> powersFor(self?.level ?: 1).map { if (it == "Recast") "I recast its weakness to…" else "I $it it!" }
+                    else -> (if (isHost) listOf("🏃 Run!") else emptyList()) + powersFor(self?.level ?: 1).map { if (it == "Recast") "I recast its weakness to…" else "I $it it!" }
                 }
                 if (chips.isNotEmpty() && !state.busy) {
                     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         chips.forEach { c ->
-                            OutlinedButton({ if (c.endsWith("…")) action = c.dropLast(1) + " " else vm.act(c) }, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 2.dp)) {
+                            OutlinedButton({ if (c == "🏃 Run!") vm.tryEscape(fromChase = false) else if (c.endsWith("…")) action = c.dropLast(1) + " " else vm.act(c) }, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 2.dp)) {
                                 Text(c, fontSize = 12.sp)
                             }
                         }

@@ -1,6 +1,7 @@
 package com.hocmemini.raid
 
 import android.app.Application
+import android.util.Log
 import android.content.Context
 import android.net.Uri
 import android.os.VibrationEffect
@@ -420,6 +421,7 @@ class GameSession(private val app: Application) {
             "epithet" -> { sfx.play("levelup"); sfx.narrate(f.say, 400) }
             "windup" -> sfx.play("windup")
             "pin" -> sfx.play("ping")
+            "flee" -> { sfx.play("whoosh"); sfx.play("steps", 150) }
             "bind" -> { sfx.play("npc"); sfx.speak(f.taunt, pitch, 1.0f, 300) }
             else -> {
                 if (f.power.isNotBlank()) sfx.play("legendary", 0, 0.6f, 1.2f)
@@ -669,7 +671,13 @@ class GameSession(private val app: Application) {
                 if (me.xp >= trade.priceXp) { me = me.copy(xp = me.xp - trade.priceXp, items = (me.items + Item(trade.item, trade.effect)).takeLast(BAG_SLOTS)); spent = trade.priceXp; item = trade.item; next = next.withLog("💰 ${me.name} buys ${trade.item} for ${trade.priceXp} XP$tag: ${trade.effect}") }
                 else next = next.withLog("💰 ${trade.item}: ${trade.priceXp} XP$tag — ${me.name} has ${me.xp}. Go earn it.")
             }
-            if (gift != null) { me = me.copy(items = (me.items + Item(gift.item, gift.effect)).takeLast(BAG_SLOTS)); item = gift.item; next = next.withLog("🎁 ${npc.name} gives ${me.name} ${gift.item}: ${gift.effect}") }
+            if (gift != null) {
+                if (npc.role == "merchant" && me.xp >= MERCHANT_MIN_PRICE) {
+                    // merchants don't do charity: a "gift" from one is a sale at the counter minimum
+                    me = me.copy(xp = me.xp - MERCHANT_MIN_PRICE, items = (me.items + Item(gift.item, gift.effect)).takeLast(BAG_SLOTS)); spent = MERCHANT_MIN_PRICE; item = gift.item
+                    next = next.withLog("💰 ${me.name} buys ${gift.item} for $MERCHANT_MIN_PRICE XP: ${gift.effect}")
+                } else { me = me.copy(items = (me.items + Item(gift.item, gift.effect)).takeLast(BAG_SLOTS)); item = gift.item; next = next.withLog("🎁 ${npc.name} gives ${me.name} ${gift.item}: ${gift.effect}") }
+            }
             if (heal > 0 && me.hp < me.maxHp) { healed = min(heal, me.maxHp - me.hp); me = me.copy(hp = me.hp + healed); next = next.withLog("💚 ${npc.name} heals ${me.name}: +$healed HP") }
             next = next.copy(players = next.players + (me.id to me), fx = Fx(nextSeq(s), p.id, label = "say", say = reply, taunt = "", xpSpent = spent, item = item, potion = healed))
             if (reply.isNotBlank()) next = next.withLog("${npc.emoji} ${reply.take(220)}")
@@ -746,7 +754,26 @@ class GameSession(private val app: Application) {
         val (r, reply) = runCatching { g.resolve(p.name, text, audioWav, m.name, m.hp, m.weakness, facing, flanking, p.items.map { it.toString() }, p.potions, powersFor(p.level)) }
             .getOrElse { state.update { s -> s.copy(busy = false).withLog("Gemma error: ${it.message?.take(100)}") }; broadcast(); return }
         statsStore.update { it.copy(resolves = it.resolves + 1, resolveMs = it.resolveMs + (System.currentTimeMillis() - t0), audioResolves = it.audioResolves + (if (audioWav != null) 1 else 0), toolRetries = g.retries) }
-        if (r == null) { state.update { it.copy(busy = false).withLog("The DM mumbles: ${reply.take(200)}") }; broadcast(); return }
+        if (r == null) {
+            val used = g.lastItemUsed; val potion = g.lastPotionRequested
+            if (used != null || potion) {
+                // the model acted (used an item / drank) but skipped the verdict: narrate the mechanics ourselves
+                val itemName = used?.let { want -> p.items.firstOrNull { it.name.contains(want, true) || want.contains(it.name, true) } }
+                state.update { s ->
+                    val cur = s.players[p.id] ?: p
+                    var me = cur; var healed = 0
+                    if (potion && cur.potions > 0 && cur.hp < cur.maxHp) { healed = min(POTION_HEAL, cur.maxHp - cur.hp); me = me.copy(hp = me.hp + healed, potions = me.potions - 1) }
+                    var next = s.copy(busy = false, windup = 0, players = s.players + (me.id to me), fx = Fx(nextSeq(s), p.id, potion = healed, item = itemName?.name ?: ""))
+                    if (itemName != null) next = next.withLog("🎁 ${p.name} readies ${itemName.name}: ${itemName.effect}. Now strike with it!")
+                    if (healed > 0) next = next.withLog("🧪 ${me.name} drinks a potion: +$healed HP (${me.potions} left)")
+                    if (itemName == null && healed == 0) next = next.withLog("The DM squints. Try that again, louder.")
+                    next
+                }
+            } else {
+                state.update { it.copy(busy = false).withLog(if (reply.isBlank()) "The DM blinks. ${m.name} waits. Say it again." else "The DM mumbles: ${reply.take(200)}") }
+            }
+            broadcast(); return
+        }
 
         // ---- powers (level-gated verbs) ----
         val power = g.lastPower?.takeIf { it.first in powersFor(p.level) }
@@ -915,6 +942,29 @@ class GameSession(private val app: Application) {
         onPhaseChanged(Phase.EXPLORE); broadcast()
     }
 
+    /** Try to get away. Moving matters: steps since the fight began feed the roll; level helps. */
+    fun tryEscape(fromChase: Boolean) {
+        if (role.value != Role.HOST) return
+        val s0 = state.value
+        val m = s0.monster ?: return
+        if (s0.phase != Phase.BATTLE || s0.busy) return
+        val me = s0.players[selfId] ?: return
+        val moved = steps.sinceReset.value
+        val chance = (ESCAPE_BASE + 0.05f * (me.level - 1) + 0.02f * min(moved, 20) - (if (m.name.startsWith("👑")) 0.2f else 0f)).coerceIn(0.1f, 0.85f)
+        val roll = kotlin.random.Random.nextFloat()
+        Log.i("Raid", "escape roll=${"%.2f".format(roll)} chance=${"%.2f".format(chance)} steps=$moved")
+        if (roll < chance) {
+            recordEncounter(s0, "escaped by ${me.name}")
+            windupJob?.cancel(); steps.reset()
+            state.update { s -> s.copy(phase = Phase.EXPLORE, monster = null, windup = 0, fx = Fx(nextSeq(s), selfId, label = "flee"))
+                .withLog("🏃 ${me.name} slips away from ${m.name} (${(chance * 100).toInt()}% chance, $moved steps). No loot, no shame.") }
+            onPhaseChanged(Phase.EXPLORE); broadcast()
+        } else {
+            state.update { s -> s.withLog("🏃 ${me.name} tries to run (${(chance * 100).toInt()}% chance)… ${m.name} is faster.") }
+            if (fromChase) reanchorMonster(chase = true) else scope.launch { monsterTurn() }
+        }
+    }
+
     fun reanchorMonster(chase: Boolean) {
         if (role.value != Role.HOST) return
         val h = compass.heading.value
@@ -958,5 +1008,7 @@ class GameSession(private val app: Application) {
         const val SECOND_WIND_HP = 6
         const val IDLE_STRIKE_SECONDS = 25
         const val COMPANION_DMG = 4
+        const val MERCHANT_MIN_PRICE = 20
+        const val ESCAPE_BASE = 0.35f
     }
 }

@@ -388,7 +388,8 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
         tools.trade = null; tools.gift = null; tools.heal = 0
         val situation = buildString {
             append("You are now $npcName, the $role. Stay in character, under 40 words. $playerName has $xp XP and carries: ${items.ifEmpty { listOf("nothing") }.joinToString(", ")}. ")
-            append("Use sell_item when they ask to buy or what's for sale — the tool's price is the real price, so say that exact number; a good haggle earns discountPercent. give_item for a free gift at most once, heal_player to heal. ")
+            if (role == "merchant") append("A merchant SELLS: when they ask to buy or what's for sale, call sell_item (its price is the real price; say that exact number; a good haggle earns discount_percent). Never call give_item as a merchant. ")
+            else append("Use give_item for a free gift at most once, heal_player to heal (healers only). ")
             if (audioWav != null) append("$playerName speaks in the attached audio.") else append("$playerName says: \"$text\"")
         }
         val reply = if (audioWav != null) send(Contents.of(Content.AudioBytes(audioWav), Content.Text(situation))) else send(Contents.of(situation))
@@ -434,6 +435,8 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
     }
 
     val lastPower: Pair<String, String>? get() = tools.power
+    val lastItemUsed: String? get() = tools.itemUsed
+    val lastPotionRequested: Boolean get() = tools.potionRequested
 
     /** Level-up: a title from how they fought. Throwaway conversation. */
     suspend fun epithet(playerName: String, level: Int, deeds: String): String? = withContext(Dispatchers.IO) {

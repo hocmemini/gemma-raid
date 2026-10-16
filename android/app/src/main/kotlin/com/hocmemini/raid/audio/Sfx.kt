@@ -31,10 +31,26 @@ class Sfx(context: Context) {
     private var loopName = ""
     @Volatile var muted = false
 
+    /** Three distinct voices, best local quality first: dungeon master, monster, NPC. */
+    private var voiceDm: android.speech.tts.Voice? = null
+    private var voiceMonster: android.speech.tts.Voice? = null
+    private var voiceNpc: android.speech.tts.Voice? = null
+
     init {
         tts = TextToSpeech(context) { status: Int ->
             ttsReady = status == TextToSpeech.SUCCESS
-            if (ttsReady) runCatching { tts?.language = Locale.US }
+            if (ttsReady) runCatching {
+                tts?.language = Locale.US
+                val all = tts?.voices.orEmpty().filter { it.locale.language == "en" && !it.isNetworkConnectionRequired && !it.features.contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED) }
+                val ranked = all.sortedWith(compareByDescending<android.speech.tts.Voice> { it.quality }.thenByDescending { it.locale.country == "US" }.thenBy { it.name })
+                Log.i("Sfx", "voices: " + ranked.joinToString { "${it.name}(q${it.quality}${if (it.isNetworkConnectionRequired) ",net" else ""})" })
+                // Google's newer local voices carry "x-..." ids; prefer distinct ones so the three characters differ.
+                val us = ranked.filter { it.locale.country == "US" }.ifEmpty { ranked }
+                voiceDm = us.getOrNull(0)
+                voiceMonster = us.firstOrNull { it.name.contains("iom", true) || it.name.contains("iog", true) || it.name.contains("tpd", true) } ?: us.getOrNull(1) ?: voiceDm
+                voiceNpc = us.firstOrNull { it != voiceDm && it != voiceMonster && (it.name.contains("iob", true) || it.name.contains("tpc", true) || it.name.contains("sfg", true)) } ?: us.getOrNull(2) ?: voiceDm
+                Log.i("Sfx", "picked dm=${voiceDm?.name} monster=${voiceMonster?.name} npc=${voiceNpc?.name}")
+            }
             Log.i("Sfx", "tts ready=$ttsReady")
         }
     }
@@ -63,7 +79,11 @@ class Sfx(context: Context) {
     fun speak(text: String, pitch: Float, rate: Float = 1f, delayMs: Long = 0) {
         if (muted || !ttsReady || text.isBlank()) return
         main.postDelayed({
-            tts?.setPitch(pitch); tts?.setSpeechRate(rate)
+            // monsters: a different voice body, modest pitch drop (extreme pitch shifts are what sounds robotic)
+            val v = if (pitch < 1f) voiceMonster else voiceNpc
+            runCatching { if (v != null) tts?.voice = v }
+            tts?.setPitch(if (pitch < 1f) (0.72f + (pitch - 0.4f) * 0.4f).coerceIn(0.7f, 0.9f) else pitch.coerceIn(1.0f, 1.25f))
+            tts?.setSpeechRate(rate)
             tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "voice")
         }, delayMs)
     }
@@ -74,6 +94,7 @@ class Sfx(context: Context) {
     fun narrate(text: String, delayMs: Long = 0) {
         if (muted || !ttsReady || text.isBlank()) return
         main.postDelayed({
+            runCatching { voiceDm?.let { tts?.voice = it } }
             tts?.setPitch(1.0f); tts?.setSpeechRate(1.05f)
             tts?.speak(text, TextToSpeech.QUEUE_ADD, null, "narration")
         }, delayMs)
