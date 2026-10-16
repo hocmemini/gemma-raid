@@ -316,7 +316,9 @@ class GameSession(private val app: Application) {
     private fun nameTheDungeon() = scope.launch {
         val g = gemma ?: return@launch
         delay(1500)
-        val r = runCatching { g.dungeonName(env.describe(), state.value.omens.take(3).joinToString { it.name }, reputation()) }.getOrNull() ?: return@launch
+        val r = runCatching { g.dungeonName(env.describe(), state.value.omens.take(3).joinToString { it.name }, reputation()) }.onFailure { Log.w("Raid", "dungeon naming failed: ${it.message}") }.getOrNull()
+        Log.i("Raid", "dungeon: $r")
+        if (r == null) return@launch
         val (name, motto) = r
         journalMark("🏰 $name")
         state.update { it.copy(dungeon = name, fx = Fx(nextSeq(it), label = "dungeon", say = "Welcome to $name. $motto")).withLog("🏰 You have entered $name. \"$motto\"") }

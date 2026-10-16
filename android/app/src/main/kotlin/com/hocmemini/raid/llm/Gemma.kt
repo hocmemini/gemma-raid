@@ -136,8 +136,9 @@ class GameTools : ToolSet {
         @ToolParam(description = "One single emoji that best represents this monster") emoji: String,
         @ToolParam(description = "Two or three single emoji to draw onto the real object as its features, separated by spaces, e.g. 👀 🗡️ 🔥") accessories: String,
         @ToolParam(description = "One short line the monster shouts at the players as it appears, ALL CAPS, under 8 words") taunt: String,
+        @ToolParam(description = "How it talks, under 8 words, e.g. 'hisses in the third person'") voice: String,
     ): Map<String, Any> {
-        spawned = runCatching { SpawnedMonster(name.clean(), hp.coerceIn(10, 80), splitList(attacks.clean()), weakness.clean(), flavor.clean(), emoji.clean().take(4).ifBlank { "👾" }, splitEmoji(accessories.clean()), taunt.clean().take(60)) }.getOrNull()
+        spawned = runCatching { SpawnedMonster(name.clean(), hp.coerceIn(10, 80), splitList(attacks.clean()), weakness.clean(), flavor.clean(), emoji.clean().take(4).ifBlank { "👾" }, splitEmoji(accessories.clean()), taunt.clean().take(60), voice.clean().take(60)) }.getOrNull()
         Log.i("Gemma", "spawn_monster $name hp=$hp weak=$weakness attacks=$attacks | $flavor")
         return mapOf("ok" to true)
     }
@@ -213,7 +214,7 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
         val c = engine!!.createConversation(
             ConversationConfig(
                 systemInstruction = Contents.of(SYSTEM_PROMPT + extraSystem),
-                tools = listOf(tool(tools)),
+                tools = if (structured) emptyList() else listOf(tool(tools)),
                 samplerConfig = SamplerConfig(topK = 40, topP = 0.95, temperature = 0.9),
                 thinkingConfig = ThinkingConfig(false, 0),
                 maxOutputToken = if (structured) 320 else 200,
@@ -291,20 +292,25 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
         }
         val t0 = System.currentTimeMillis()
         var line = ""
-        val viaJson = runCatching {
-            val c = newConversation(structured = true)
-            val raw = c.sendMessage(Contents.of(Content.ImageFile(imagePath), Content.Text(prompt)), responseFormat = ResponseFormat.json(MONSTER_SCHEMA)).plainText()
-            Log.i(TAG, "spawn json in ${System.currentTimeMillis() - t0} ms: ${raw.take(200).replace("\n", " ")}")
-            val j = lenientJson.decodeFromString(MonsterJson.serializer(), extractJson(raw))
-            if (j.name.isBlank()) null else SpawnedMonster(j.name.take(40), j.hp.coerceIn(10, 80), splitList(j.attacks).ifEmpty { listOf("Lunge") }, j.weakness.ifBlank { "a clever idea" }, j.flavor, j.emoji.take(4).ifBlank { "👾" }, splitEmoji(j.accessories), j.taunt.take(60), j.voice.take(60))
-        }.onFailure { Log.w(TAG, "spawn json failed: ${it.message?.take(160)}") }.getOrNull()
-        var result = viaJson
+        // 1) tool call (fast, ~15 s); syntax slips are recovered leniently
+        newConversation()
+        var reply = send(Contents.of(Content.ImageFile(imagePath), Content.Text("$prompt Call spawn_monster with those fields.")))
+        if (tools.spawned == null && reply.rawText().contains("call:")) LenientTools.recover(reply.rawText(), tools)
+        var result = tools.spawned
+        var viaJson: SpawnedMonster? = null
+        line = reply.plainText()
+        // 2) no tool call at all ("please provide an image"): constrained JSON in a tool-less conversation
         if (result == null) {
-            newConversation()
-            var reply = send(Contents.of(Content.ImageFile(imagePath), Content.Text("$prompt Call spawn_monster with those fields.")))
-            if (tools.spawned == null && reply.rawText().contains("call:")) LenientTools.recover(reply.rawText(), tools)
-            if (tools.spawned == null) { retries++; Log.w(TAG, "no spawn_monster call (model said: ${reply.rawText().take(120)}); retrying once"); reply = send(Contents.of("You must call the spawn_monster tool for the object in the photo now, then say one short line.")) }
-            result = tools.spawned; line = reply.plainText()
+            Log.w(TAG, "no spawn_monster call (model said: ${reply.rawText().take(100)}); falling back to JSON")
+            retries++
+            viaJson = runCatching {
+                val c = newConversation(structured = true)
+                val raw = c.sendMessage(Contents.of(Content.ImageFile(imagePath), Content.Text(prompt)), responseFormat = ResponseFormat.json(MONSTER_SCHEMA)).plainText()
+                Log.i(TAG, "spawn json in ${System.currentTimeMillis() - t0} ms: ${raw.take(200).replace("\n", " ")}")
+                val j = lenientJson.decodeFromString(MonsterJson.serializer(), extractJson(raw))
+                if (j.name.isBlank()) null else SpawnedMonster(j.name.take(40), j.hp.coerceIn(10, 80), splitList(j.attacks).ifEmpty { listOf("Lunge") }, j.weakness.ifBlank { "a clever idea" }, j.flavor, j.emoji.take(4).ifBlank { "👾" }, splitEmoji(j.accessories), j.taunt.take(60), j.voice.take(60))
+            }.onFailure { Log.w(TAG, "spawn json failed: ${it.message?.take(160)}") }.getOrNull()
+            result = viaJson
         }
         Log.i(TAG, "sheet took ${System.currentTimeMillis() - t0} ms; ok=${result != null}; json=${viaJson != null}")
         result to line
@@ -378,19 +384,21 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
             append("Answer as JSON: name, role (merchant|sage|healer|oddball), emoji (one), accessories (2-3 emoji separated by spaces), greeting (under 15 words), offer (one short line of what they offer).")
         }
         val t0 = System.currentTimeMillis()
-        val viaJson = runCatching {
-            val c = newConversation(structured = true)
-            val raw = c.sendMessage(Contents.of(Content.ImageFile(imagePath), Content.Text(prompt)), responseFormat = ResponseFormat.json(NPC_SCHEMA)).plainText()
-            Log.i(TAG, "meet json in ${System.currentTimeMillis() - t0} ms: ${raw.take(200).replace("\n", " ")}")
-            val j = lenientJson.decodeFromString(NpcJson.serializer(), extractJson(raw))
-            if (j.name.isBlank()) null else SpawnedNpc(j.name.take(40), j.role.lowercase().take(12), j.emoji.take(4).ifBlank { "🙂" }, splitEmoji(j.accessories), j.greeting.take(90), j.offer.take(90))
-        }.onFailure { Log.w(TAG, "meet json failed: ${it.message?.take(160)}") }.getOrNull()
-        var result = viaJson; var line = ""
+        newConversation()
+        var reply = send(Contents.of(Content.ImageFile(imagePath), Content.Text("$prompt Call spawn_npc with those fields.")))
+        if (tools.npc == null && reply.rawText().contains("call:")) LenientTools.recover(reply.rawText(), tools)
+        var result = tools.npc; var line = reply.plainText()
+        var viaJson: SpawnedNpc? = null
         if (result == null) {
-            newConversation()
-            var reply = send(Contents.of(Content.ImageFile(imagePath), Content.Text("$prompt Call spawn_npc with those fields.")))
-            if (tools.npc == null) { retries++; reply = send(Contents.of("You must call the spawn_npc tool for the object in the photo now.")) }
-            result = tools.npc; line = reply.plainText()
+            retries++
+            viaJson = runCatching {
+                val c = newConversation(structured = true)
+                val raw = c.sendMessage(Contents.of(Content.ImageFile(imagePath), Content.Text(prompt)), responseFormat = ResponseFormat.json(NPC_SCHEMA)).plainText()
+                Log.i(TAG, "meet json in ${System.currentTimeMillis() - t0} ms: ${raw.take(200).replace("\n", " ")}")
+                val j = lenientJson.decodeFromString(NpcJson.serializer(), extractJson(raw))
+                if (j.name.isBlank()) null else SpawnedNpc(j.name.take(40), j.role.lowercase().take(12), j.emoji.take(4).ifBlank { "🙂" }, splitEmoji(j.accessories), j.greeting.take(90), j.offer.take(90))
+            }.onFailure { Log.w(TAG, "meet json failed: ${it.message?.take(160)}") }.getOrNull()
+            result = viaJson
         }
         if (result != null) newConversation(npcPersona(result))
         Log.i(TAG, "meet took ${System.currentTimeMillis() - t0} ms; ok=${result != null}; json=${viaJson != null}")
@@ -557,7 +565,7 @@ object LenientTools {
             return def
         }
         return when (tool) {
-            "spawn_monster" -> { t.spawn_monster(str("name").ifBlank { "The Thing" }, int("hp", 30), str("attacks").replace("\"", ","), str("weakness").ifBlank { "a clever idea" }, str("flavor"), str("emoji").ifBlank { "👾" }, str("accessories").replace("\"", " "), str("taunt")); true }
+            "spawn_monster" -> { t.spawn_monster(str("name").ifBlank { "The Thing" }, int("hp", 30), str("attacks").replace("\"", ","), str("weakness").ifBlank { "a clever idea" }, str("flavor"), str("emoji").ifBlank { "👾" }, str("accessories").replace("\"", " "), str("taunt"), str("voice")); true }
             "resolve_action" -> { t.resolve_action(int("damage_to_monster", 4), int("damage_to_player", 2), str("narration").ifBlank { "The blow lands, more or less." }, int("style", 3), str("taunt")); true }
             "spawn_npc" -> { t.spawn_npc(str("name").ifBlank { "A Stranger" }, str("role").ifBlank { "oddball" }, str("emoji").ifBlank { "🙂" }, str("accessories").replace("\"", " "), str("greeting"), str("offer")); true }
             "drop_loot" -> { t.drop_loot(str("name").ifBlank { "a curious trinket" }, str("effect")); true }
