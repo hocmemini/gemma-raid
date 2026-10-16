@@ -28,7 +28,9 @@ adjudicates every move through function calls so the game state stays determinis
 | Talk | the same text box and hold-to-talk work while exploring (ask the DM for lore and tips) and with NPCs |
 | NPCs | **Meet** turns an object into a merchant, sage, healer or oddball via `spawn_npc`; they `sell_item` for XP, `give_item`, `heal_player` |
 | Levels unlock verbs | L2 Taunt (daze), L3 Parley (talk a monster into an NPC), L4 Bind (a slain monster fights beside you, shouting its move), L5 Recast (declare a new weakness); `use_power` tool, `grant_epithet` names you at each level-up and monsters hear your reputation |
-| Stats | persisted campaign/combat/playstyle/Gemma-latency stats and a hall of monsters |
+| Stats | persisted campaign/combat/playstyle/Gemma-latency stats, a hall of monsters with cut-out thumbnails, a journal |
+| Lurkers | while you explore, the host silently samples the camera when you move, keeps frames with a real subject under the crosshair, pre-generates the monster when the engine is idle, and ambushes you 25-60 steps later |
+| Moments | the cut-out stirs on the object within a second of the photo while the sheet is written; boss-style intro; victory splash with XP, loot, Bind; trophy card PNG saved to Photos |
 
 Every game-affecting number comes out of a tool call, never parsed from prose. Open weights are the whole game: nothing works without the model on the phone.
 
@@ -67,6 +69,9 @@ Tested on Pixel 8 Pro (Android 17). Any Android 12+ phone with Bluetooth can joi
 - [x] segmented-sprite monster with dance / dodge / perspective strike; chase and re-pin
 - [x] talk anywhere, NPC merchants/sages/healers, idle monster strikes
 - [x] level powers (Taunt, Parley, Bind companions, Recast), epithets, ambient sound loops
+- [x] constrained-JSON spawns, lenient tool-call recovery, snake_case params (E2B quirks)
+- [x] lurkers and ambushes, reveal splashes, companions on screen, bestiary thumbnails, trophy cards
+- [x] escape rolls, merchant haggling with real prices, inventory, Brain screen with model download
 - [ ] optional online mode: `gemma-4-26b-a4b-it` via Gemini API for richer narration
 
 ## License
