@@ -55,6 +55,8 @@ data class Fx(
     val taunt: String = "",
     val potion: Int = 0,
     val item: String = "",
+    val levelUp: Boolean = false,
+    val wind: Boolean = false,
 )
 
 /** A nearby Wi-Fi/Bluetooth signal that Gemma turned into lore. */

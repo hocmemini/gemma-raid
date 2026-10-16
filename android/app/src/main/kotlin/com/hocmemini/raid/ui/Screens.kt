@@ -150,6 +150,7 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit) {
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
     var action by remember { mutableStateOf("") }
     var menuOpen by remember { mutableStateOf(false) }
+    val narrate by vm.narrateAloud.collectAsState()
     var confirmLeave by remember { mutableStateOf(false) }
 
     BackHandler { confirmLeave = true }
@@ -215,6 +216,8 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit) {
             OutlinedButton({ menuOpen = true }) { Text("☰") }
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                 DropdownMenuItem(text = { Text("📊 Stats") }, onClick = { menuOpen = false; onStats() })
+                DropdownMenuItem(text = { Text(if (vm.sfx.muted) "🔈 Unmute" else "🔇 Mute") }, onClick = { vm.sfx.muted = !vm.sfx.muted; menuOpen = false })
+                DropdownMenuItem(text = { Text(if (narrate) "🗣 Stop narrating aloud" else "🗣 Narrate aloud") }, onClick = { vm.narrateAloud.value = !narrate; menuOpen = false })
                 if (isHost && state.phase == Phase.BATTLE) DropdownMenuItem(text = { Text("🏳 Abandon fight, regroup") }, onClick = { menuOpen = false; vm.nextEncounter() })
                 DropdownMenuItem(text = { Text("🚪 Leave raid") }, onClick = { menuOpen = false; confirmLeave = true })
             }

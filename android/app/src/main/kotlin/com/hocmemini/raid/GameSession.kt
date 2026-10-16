@@ -7,6 +7,7 @@ import android.os.VibrationEffect
 import android.os.VibratorManager
 import androidx.camera.core.ImageCapture
 import com.hocmemini.raid.audio.Recorder
+import com.hocmemini.raid.audio.Sfx
 import com.hocmemini.raid.camera.captureToFile
 import com.hocmemini.raid.game.Fx
 import com.hocmemini.raid.game.GameState
@@ -81,6 +82,8 @@ class GameSession(private val app: Application) {
     private var link: NearbyLink? = null
     private var gemma: Gemma? = null
     private val recorder = Recorder()
+    val sfx = Sfx(app)
+    val narrateAloud = MutableStateFlow(false)
     private val scanner = SignalScanner(app)
     val statsStore = StatsStore(app)
     private var raidStartedAt = 0L
@@ -238,6 +241,7 @@ class GameSession(private val app: Application) {
         val f = s.fx ?: return
         if (f.seq == lastFxSeq) return
         lastFxSeq = f.seq
+        playFx(f, s)
         val mine = f.playerId == selfId
         statsStore.update { st ->
             var n = st
@@ -250,6 +254,26 @@ class GameSession(private val app: Application) {
             if (f.killed) n = n.copy(kills = n.kills + 1, bosses = n.bosses + (if (s.monster?.name?.startsWith("👑") == true) 1 else 0), longestFightTurns = maxOf(n.longestFightTurns, s.turn))
             if (f.label == "spawn") n = n.copy(encounters = n.encounters + 1)
             n
+        }
+    }
+
+    /** Sound design for one exchange, timed to the animations in MonsterOverlay/FxLayer. */
+    private fun playFx(f: Fx, s: GameState) {
+        when {
+            f.label == "spawn" -> { sfx.play("spawn"); sfx.growl(f.taunt, 700) }
+            f.label == "omens" -> sfx.play("omen")
+            else -> {
+                if (f.dealt > 0) { sfx.play("slash"); sfx.play("hit", 130) } else if (f.playerId.isNotBlank() && f.potion == 0) sfx.play("miss")
+                if (f.label == "LEGENDARY!") sfx.play("legendary", 200)
+                if (f.potion > 0) sfx.play("potion", 150)
+                if (f.parried) sfx.play("parry", 320)
+                else if (f.taken > 0) sfx.play("attack", 260)
+                if (f.killed) { sfx.play("kill", 350); sfx.play("victory", 1100) }
+                else if (f.taunt.isNotBlank()) sfx.growl(f.taunt, if (f.taken > 0) 900 else 500)
+                if (f.levelUp) sfx.play("levelup", 1300)
+                if (f.wind) sfx.play("wind", 600)
+                if (narrateAloud.value && !f.killed) s.log.dropLast(1).lastOrNull()?.let { sfx.narrate(it, 1400) }
+            }
         }
     }
 
@@ -367,7 +391,7 @@ class GameSession(private val app: Application) {
         statsStore.update { it.copy(omensRead = it.omensRead + omens.size) }
         val lair = omens.filter { it.threat >= 4 }.maxByOrNull { it.dbm }
         state.update { s ->
-            var next = s.copy(busy = false, omens = omens, bossLair = lair)
+            var next = s.copy(busy = false, omens = omens, bossLair = lair, fx = Fx(nextSeq(s), label = "omens"))
             omens.forEach { o -> next = next.withLog("${"☠".repeat(o.threat)} ${o.name} (\"${o.signal}\", ${o.dbm} dBm): ${o.lore}") }
             if (lair != null) next = next.withLog("👑 This is the lair of ${lair.name}. The next monster will be a BOSS.")
             if (line.isNotBlank()) next = next.withLog(line.take(160))
@@ -472,10 +496,12 @@ class GameSession(private val app: Application) {
             if (healed > 0) next = next.withLog("🧪 ${me.name} drinks a potion: +$healed HP (${me.potions} left)")
             else if (r.drankPotion && cur.potions <= 0) next = next.withLog("🧪 ${me.name} reaches for a potion — the bag is empty")
             if (wind) next = next.withLog("💫 ${me.name} refuses to fall — second wind! Back up with ${SECOND_WIND_HP} HP.")
-            if (newLevel > me.level) {
+            val leveled = newLevel > me.level
+            if (leveled) {
                 me = me.copy(level = newLevel, maxHp = maxHpFor(newLevel), hp = maxHpFor(newLevel))
                 next = next.withLog("⬆ ${me.name} reached level $newLevel! Max HP ${me.maxHp}, fully healed.")
             }
+            next = next.copy(fx = next.fx?.copy(levelUp = leveled, wind = wind))
             var players = next.players + (me.id to me)
             if (killed) {
                 players = players.mapValues { (_, q) -> if (q.hp > 0) q.copy(potions = q.potions + 1) else q }
