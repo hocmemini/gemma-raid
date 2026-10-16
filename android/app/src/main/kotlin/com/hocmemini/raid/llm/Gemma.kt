@@ -204,7 +204,7 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
         onStatus("ready in ${secs}s on $backendName")
     }
 
-    private fun newConversation(extraSystem: String = ""): Conversation {
+    private fun newConversation(extraSystem: String = "", structured: Boolean = false): Conversation {
         conversation?.close()
         val c = engine!!.createConversation(
             ConversationConfig(
@@ -212,7 +212,8 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
                 tools = listOf(tool(tools)),
                 samplerConfig = SamplerConfig(topK = 40, topP = 0.95, temperature = 0.9),
                 thinkingConfig = ThinkingConfig(false, 0),
-                maxOutputToken = 200,
+                maxOutputToken = if (structured) 320 else 200,
+                enableResponseFormat = structured,
             )
         )
         conversation = c
@@ -286,8 +287,9 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
         val t0 = System.currentTimeMillis()
         var line = ""
         val viaJson = runCatching {
-            val raw = askJson(Contents.of(Content.ImageFile(imagePath), Content.Text(prompt)), MONSTER_SCHEMA)
-            Log.i(TAG, "spawn json: ${raw.take(300)}")
+            val c = newConversation(structured = true)
+            val raw = c.sendMessage(Contents.of(Content.ImageFile(imagePath), Content.Text(prompt)), responseFormat = ResponseFormat.json(MONSTER_SCHEMA)).plainText()
+            Log.i(TAG, "spawn json in ${System.currentTimeMillis() - t0} ms: ${raw.take(200).replace("\n", " ")}")
             val j = lenientJson.decodeFromString(MonsterJson.serializer(), extractJson(raw))
             if (j.name.isBlank()) null else SpawnedMonster(j.name.take(40), j.hp.coerceIn(10, 80), splitList(j.attacks).ifEmpty { listOf("Lunge") }, j.weakness.ifBlank { "a clever idea" }, j.flavor, j.emoji.take(4).ifBlank { "👾" }, splitEmoji(j.accessories), j.taunt.take(60))
         }.onFailure { Log.w(TAG, "spawn json failed: ${it.message?.take(160)}") }.getOrNull()
@@ -298,8 +300,8 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
             if (tools.spawned == null) { retries++; Log.w(TAG, "no spawn_monster call (model said: ${reply.plainText().take(120)}); retrying once"); reply = send(Contents.of("You must call the spawn_monster tool for the object in the photo now, then say one short line.")) }
             result = tools.spawned; line = reply.plainText()
         }
-        // battle conversation: the monster's sheet rides in the system instruction so resolve_action knows it
-        if (result != null) {
+        // The same conversation continues into the battle: it already holds the photo and the sheet, and has tools.
+        if (result != null && viaJson == null) {
             newConversation(" The current monster is ${result.name} (HP ${result.hp}; attacks: ${result.attacks.joinToString()}; weak to ${result.weakness}). ${result.flavor}")
         }
         Log.i(TAG, "spawn took ${System.currentTimeMillis() - t0} ms; ok=${result != null}; json=${viaJson != null}")
@@ -363,8 +365,9 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
         }
         val t0 = System.currentTimeMillis()
         val viaJson = runCatching {
-            val raw = askJson(Contents.of(Content.ImageFile(imagePath), Content.Text(prompt)), NPC_SCHEMA)
-            Log.i(TAG, "meet json: ${raw.take(300)}")
+            val c = newConversation(structured = true)
+            val raw = c.sendMessage(Contents.of(Content.ImageFile(imagePath), Content.Text(prompt)), responseFormat = ResponseFormat.json(NPC_SCHEMA)).plainText()
+            Log.i(TAG, "meet json in ${System.currentTimeMillis() - t0} ms: ${raw.take(200).replace("\n", " ")}")
             val j = lenientJson.decodeFromString(NpcJson.serializer(), extractJson(raw))
             if (j.name.isBlank()) null else SpawnedNpc(j.name.take(40), j.role.lowercase().take(12), j.emoji.take(4).ifBlank { "🙂" }, splitEmoji(j.accessories), j.greeting.take(90), j.offer.take(90))
         }.onFailure { Log.w(TAG, "meet json failed: ${it.message?.take(160)}") }.getOrNull()
@@ -375,7 +378,7 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
             if (tools.npc == null) { retries++; reply = send(Contents.of("You must call the spawn_npc tool for the object in the photo now.")) }
             result = tools.npc; line = reply.plainText()
         }
-        if (result != null) newConversation(" You are now ${result.name}, the ${result.role}: ${result.offer}. Stay in character.")
+        if (result != null && viaJson == null) newConversation(" You are now ${result.name}, the ${result.role}: ${result.offer}. Stay in character.")
         Log.i(TAG, "meet took ${System.currentTimeMillis() - t0} ms; ok=${result != null}; json=${viaJson != null}")
         result to line
     }

@@ -259,6 +259,7 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit, onMo
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         CameraPreview(Modifier.fillMaxSize()) { imageCapture = it }
         DungeonVignette(intensity = if (state.phase == Phase.BATTLE) 1f else 0.8f)
+        if (isHost && state.phase == Phase.EXPLORE) Reticle()
         // long-press anywhere: re-pin the monster to where you're looking (compass drift fix)
         if (isHost && (state.phase == Phase.BATTLE || state.phase == Phase.NPC)) {
             Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures(onLongPress = { vm.reanchorMonster(chase = false) }) })
@@ -699,5 +700,24 @@ private fun FxLayer(fx: Fx?, selfId: String) {
                     .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(12.dp)).padding(horizontal = 16.dp, vertical = 6.dp),
             )
         }
+    }
+}
+
+/** Aiming reticle for Explore: whatever sits under it becomes the monster or the NPC. */
+@Composable
+private fun Reticle() {
+    val pulse by rememberInfiniteTransition(label = "ret").animateFloat(0f, 1f, infiniteRepeatable(tween(1600, easing = LinearEasing)), label = "r")
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Canvas(Modifier.size(140.dp)) {
+            val r = size.minDimension / 2
+            val gold = Color(0xFFD4AF37)
+            drawCircle(gold.copy(alpha = 0.85f), radius = r * 0.55f, style = Stroke(width = 3f))
+            drawCircle(gold.copy(alpha = (1f - pulse) * 0.5f), radius = r * (0.55f + pulse * 0.4f), style = Stroke(width = 2f))
+            val g = r * 0.12f
+            listOf(0f to -1f, 0f to 1f, -1f to 0f, 1f to 0f).forEach { (dx, dy) ->
+                drawLine(gold, Offset(center.x + dx * r * 0.62f, center.y + dy * r * 0.62f), Offset(center.x + dx * (r * 0.62f + g * 2), center.y + dy * (r * 0.62f + g * 2)), strokeWidth = 3f)
+            }
+        }
+        Text("aim at the thing", color = Color(0xFFD4AF37).copy(alpha = 0.8f), fontSize = 12.sp, modifier = Modifier.offset(y = 90.dp))
     }
 }

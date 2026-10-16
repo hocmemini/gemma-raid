@@ -16,6 +16,7 @@ import android.util.Log
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.segmentation.subject.SubjectSegmentation
 import com.google.mlkit.vision.segmentation.subject.SubjectSegmenterOptions
+import com.google.mlkit.vision.segmentation.subject.Subject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -33,22 +34,47 @@ object SpriteMaker {
     suspend fun make(context: Context, photoPath: String): File? = withContext(Dispatchers.IO) {
         val src = decode(photoPath, 1024) ?: return@withContext null
         val t0 = System.currentTimeMillis()
-        val cut = runCatching { segment(src) }.getOrNull()?.let { trimAlpha(it) }
-        val usable = cut != null && cut.width * cut.height > src.width * src.height * 0.02
+        val picked = runCatching { segmentAimed(src) }.getOrNull()
+        val cut = picked?.second?.let { trimAlpha(it) }
+        val usable = cut != null && cut.width * cut.height > src.width * src.height * 0.01
         val sprite = if (usable) cut!! else centerCrop(src)
-        Log.i(TAG, "segmentation ${if (usable) "ok" else "fallback"} in ${System.currentTimeMillis() - t0} ms; sprite ${sprite.width}x${sprite.height}")
+        Log.i(TAG, "segmentation ${if (usable) "ok (${picked?.first})" else "fallback"} in ${System.currentTimeMillis() - t0} ms; sprite ${sprite.width}x${sprite.height}")
         val scaled = fit(sprite, 512)
         val f = File(context.cacheDir, "sprite-${System.currentTimeMillis()}.png")
         f.outputStream().use { scaled.compress(Bitmap.CompressFormat.PNG, 100, it) }
         f
     }
 
-    private suspend fun segment(bmp: Bitmap): Bitmap? = withTimeoutOrNull(6000) {
+    /**
+     * All subjects, then the one the player aimed at: boxes that contain the frame centre, smallest first
+     * (the mug on the table beats the table), skipping anything that is basically the whole frame.
+     * Falls back to the subject whose centre is nearest the crosshair. Returns (reason, full-frame cut-out).
+     */
+    private suspend fun segmentAimed(bmp: Bitmap): Pair<String, Bitmap?>? = withTimeoutOrNull(7000) {
         suspendCancellableCoroutine { cont ->
-            val seg = SubjectSegmentation.getClient(SubjectSegmenterOptions.Builder().enableForegroundBitmap().build())
-            seg.process(InputImage.fromBitmap(bmp, 0))
-                .addOnSuccessListener { r -> cont.resume(r.foregroundBitmap) }
-                .addOnFailureListener { e -> Log.w(TAG, "segmentation failed: ${e.message}"); cont.resume(null) }
+            val opts = SubjectSegmenterOptions.Builder()
+                .enableMultipleSubjects(SubjectSegmenterOptions.SubjectResultOptions.Builder().enableSubjectBitmap().build())
+                .build()
+            SubjectSegmentation.getClient(opts).process(InputImage.fromBitmap(bmp, 0))
+                .addOnSuccessListener { r ->
+                    val subjects = r.subjects
+                    if (subjects.isEmpty()) { cont.resume("no subjects" to null); return@addOnSuccessListener }
+                    val cx = bmp.width / 2f; val cy = bmp.height / 2f
+                    val frame = bmp.width.toFloat() * bmp.height
+                    fun area(s: Subject) = s.width.toFloat() * s.height
+                    fun contains(s: Subject) = cx >= s.startX && cx <= s.startX + s.width && cy >= s.startY && cy <= s.startY + s.height
+                    fun dist(s: Subject): Float { val dx = (s.startX + s.width / 2f) - cx; val dy = (s.startY + s.height / 2f) - cy; return dx * dx + dy * dy }
+                    val sane = subjects.filter { area(it) in (frame * 0.005f)..(frame * 0.6f) }
+                    val aimed = sane.filter { contains(it) }.minByOrNull { area(it) }
+                        ?: sane.minByOrNull { dist(it) }
+                        ?: subjects.minByOrNull { dist(it) }!!
+                    val why = "${subjects.size} subjects, picked ${aimed.width}x${aimed.height}${if (contains(aimed)) " under crosshair" else " nearest"}"
+                    // paste the subject's bitmap back at its frame position so trimAlpha/crop logic stays the same
+                    val full = Bitmap.createBitmap(bmp.width, bmp.height, Bitmap.Config.ARGB_8888)
+                    aimed.bitmap?.let { Canvas(full).drawBitmap(it, aimed.startX.toFloat(), aimed.startY.toFloat(), null) }
+                    cont.resume(why to full)
+                }
+                .addOnFailureListener { e -> Log.w(TAG, "segmentation failed: ${e.message}"); cont.resume("failed" to null) }
         }
     }
 
