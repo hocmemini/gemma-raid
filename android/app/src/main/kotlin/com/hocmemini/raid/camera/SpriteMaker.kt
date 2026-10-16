@@ -31,12 +31,13 @@ import kotlin.coroutines.resume
 object SpriteMaker {
     private const val TAG = "Sprite"
 
-    suspend fun make(context: Context, photoPath: String): File? = withContext(Dispatchers.IO) {
+    suspend fun make(context: Context, photoPath: String, requireSubject: Boolean = false): File? = withContext(Dispatchers.IO) {
         val src = decode(photoPath, 1024) ?: return@withContext null
         val t0 = System.currentTimeMillis()
         val picked = runCatching { segmentAimed(src) }.getOrNull()
         val cut = picked?.second?.let { trimAlpha(it) }
         val usable = cut != null && cut.width * cut.height > src.width * src.height * 0.01
+        if (requireSubject && (!usable || picked?.first?.contains("under crosshair") != true)) { Log.i(TAG, "scout: nothing under the crosshair (${picked?.first})"); return@withContext null }
         val sprite = if (usable) cut!! else centerCrop(src)
         Log.i(TAG, "segmentation ${if (usable) "ok (${picked?.first})" else "fallback"} in ${System.currentTimeMillis() - t0} ms; sprite ${sprite.width}x${sprite.height}")
         val scaled = fit(sprite, 512)
@@ -117,6 +118,20 @@ object SpriteMaker {
         }
         c.drawRect(0f, 0f, side.toFloat(), side.toFloat(), mask)
         return out
+    }
+
+    /** 8x8 grayscale thumbprint of a sprite file, for "have we seen this already". */
+    fun signature(file: File): IntArray {
+        val b = BitmapFactory.decodeFile(file.absolutePath) ?: return IntArray(64)
+        val t = Bitmap.createScaledBitmap(b, 8, 8, true)
+        val out = IntArray(64)
+        for (y in 0 until 8) for (x in 0 until 8) { val p = t.getPixel(x, y); out[y * 8 + x] = if ((p ushr 24) < 40) -1 else ((p shr 16 and 0xff) + (p shr 8 and 0xff) + (p and 0xff)) / 3 }
+        return out
+    }
+    fun similar(a: IntArray, b: IntArray): Boolean {
+        var d = 0; var n = 0
+        for (i in 0 until 64) { if (a[i] < 0 && b[i] < 0) continue; if (a[i] < 0 || b[i] < 0) { d += 255; n++; continue }; d += kotlin.math.abs(a[i] - b[i]); n++ }
+        return n == 0 || d / n < 28
     }
 
     private fun fit(bmp: Bitmap, maxSide: Int): Bitmap {

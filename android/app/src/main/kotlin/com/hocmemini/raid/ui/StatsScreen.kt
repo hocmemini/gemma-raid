@@ -48,6 +48,7 @@ fun StatsScreen(vm: GameSession, onBack: () -> Unit) {
             StatRow("Bosses slain", st.bosses); StatRow("Party wipes", st.wipes)
             StatRow("Time in raids", fmtTime(st.playSeconds)); StatRow("Steps walked exploring", st.stepsWalked)
             StatRow("Omens read", st.omensRead); StatRow("Longest fight", "${st.longestFightTurns} turns")
+            StatRow("Things that followed you", st.lurkersSeen); StatRow("Ambushes survived", st.ambushes)
         }
         StatCard("Combat") {
             StatRow("Damage dealt", st.damageDealt); StatRow("Damage taken", st.damageTaken); StatRow("Best single hit", st.bestHit)

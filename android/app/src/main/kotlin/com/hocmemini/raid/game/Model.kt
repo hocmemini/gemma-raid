@@ -106,6 +106,10 @@ data class Omen(val signal: String, val name: String, val lore: String, val thre
 @Serializable
 data class Victory(val name: String, val emoji: String, val xp: Int, val by: String, val loot: String = "", val lootEffect: String = "", val turns: Int = 0)
 
+/** A monster pre-generated from something the host walked past; springs an ambush later. */
+@Serializable
+data class Lurker(val name: String, val hp: Int, val attacks: List<String>, val weakness: String, val flavor: String, val emoji: String, val accessories: List<String>, val taunt: String, val sprite: String, val capturedAt: Long)
+
 @Serializable
 data class GameState(
     val phase: Phase = Phase.LOBBY,
@@ -132,6 +136,9 @@ data class GameState(
     /** Lines ever logged; lets every phone append only new lines to its journal. */
     val logTotal: Int = 0,
     val victory: Victory? = null,
+    /** How many pre-generated monsters are following the party (host shares the count). */
+    val lurking: Int = 0,
+    val ambush: Boolean = false,
     /** Set when the strongest omen is menacing enough: the next spawn is its boss. */
     val bossLair: Omen? = null,
 ) {

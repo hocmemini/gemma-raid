@@ -21,6 +21,8 @@ import com.google.ai.edge.litertlm.ToolSet
 import com.google.ai.edge.litertlm.tool
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 data class SpawnedMonster(val name: String, val hp: Int, val attacks: List<String>, val weakness: String, val flavor: String, val emoji: String, val accessories: List<String>, val taunt: String)
 data class Resolved(val damageToMonster: Int, val damageToPlayer: Int, val narration: String, val style: Int, val taunt: String, val drankPotion: Boolean = false, val usedItem: String? = null)
@@ -180,6 +182,8 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
     private var conversation: Conversation? = null
     private var turns = 0
     val tools = GameTools()
+    /** The engine runs one generation at a time; background lurker sheets queue behind player actions. */
+    val lock = Mutex()
     /** Incremented whenever a tool call had to be re-prompted. */
     @Volatile var retries = 0
 
@@ -273,8 +277,8 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
         }
     }
 
-    /** Photo of a real object -> monster. Constrained JSON first (reliable); the tool path only as a fallback. Starts the battle conversation. */
-    suspend fun spawn(imagePath: String, stepsWalked: Int, environment: String, bossLair: String?, reputation: String): Pair<SpawnedMonster?, String> = withContext(Dispatchers.IO) {
+    /** Photo of a real object -> monster sheet only (constrained JSON, tool path as fallback). No battle conversation yet. */
+    suspend fun sheet(imagePath: String, stepsWalked: Int, environment: String, bossLair: String?, reputation: String): Pair<SpawnedMonster?, String> = lock.withLock { withContext(Dispatchers.IO) {
         tools.spawned = null
         val prompt = buildString {
             append("Look at this photo. Pick the most prominent object or feature and turn it into a monster. ")
@@ -297,15 +301,24 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
         if (result == null) {
             newConversation()
             var reply = send(Contents.of(Content.ImageFile(imagePath), Content.Text("$prompt Call spawn_monster with those fields.")))
-            if (tools.spawned == null) { retries++; Log.w(TAG, "no spawn_monster call (model said: ${reply.plainText().take(120)}); retrying once"); reply = send(Contents.of("You must call the spawn_monster tool for the object in the photo now, then say one short line.")) }
+            if (tools.spawned == null && reply.rawText().contains("call:")) LenientTools.recover(reply.rawText(), tools)
+            if (tools.spawned == null) { retries++; Log.w(TAG, "no spawn_monster call (model said: ${reply.rawText().take(120)}); retrying once"); reply = send(Contents.of("You must call the spawn_monster tool for the object in the photo now, then say one short line.")) }
             result = tools.spawned; line = reply.plainText()
         }
-        // The same conversation continues into the battle: it already holds the photo and the sheet, and has tools.
-        if (result != null && viaJson == null) {
-            newConversation(" The current monster is ${result.name} (HP ${result.hp}; attacks: ${result.attacks.joinToString()}; weak to ${result.weakness}). ${result.flavor}")
-        }
-        Log.i(TAG, "spawn took ${System.currentTimeMillis() - t0} ms; ok=${result != null}; json=${viaJson != null}")
+        Log.i(TAG, "sheet took ${System.currentTimeMillis() - t0} ms; ok=${result != null}; json=${viaJson != null}")
         result to line
+    } }
+
+    /** Start the battle conversation for a sheet (fresh, with tools, the monster in the system instruction). */
+    suspend fun beginBattle(m: SpawnedMonster, ambush: Boolean) = lock.withLock { withContext(Dispatchers.IO) {
+        newConversation(" The current monster is ${m.name} (HP ${m.hp}; attacks: ${m.attacks.joinToString()}; weak to ${m.weakness}). ${m.flavor}" + if (ambush) " It ambushed the players who walked past it earlier." else "")
+    } }
+
+    /** Photo -> monster, ready to fight. */
+    suspend fun spawn(imagePath: String, stepsWalked: Int, environment: String, bossLair: String?, reputation: String): Pair<SpawnedMonster?, String> {
+        val r = sheet(imagePath, stepsWalked, environment, bossLair, reputation)
+        r.first?.let { beginBattle(it, ambush = false) }
+        return r
     }
 
     /**
@@ -324,7 +337,7 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
         items: List<String>,
         potions: Int,
         powers: List<String>,
-    ): Pair<Resolved?, String> = withContext(Dispatchers.IO) {
+    ): Pair<Resolved?, String> = lock.withLock { withContext(Dispatchers.IO) {
         tools.resolved = null; tools.potionRequested = false; tools.itemUsed = null; tools.power = null
         if (turns >= MAX_TURNS_PER_CONVERSATION) {
             newConversation(" A battle is in progress: $monsterName (HP $monsterHp, weak to $weakness) fights the players.")
@@ -353,10 +366,10 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
         }
         Log.i(TAG, "resolve took ${System.currentTimeMillis() - t0} ms; tool=${tools.resolved != null}; audio=${audioWav != null}; potion=${tools.potionRequested}; item=${tools.itemUsed}")
         tools.resolved?.copy(drankPotion = tools.potionRequested, usedItem = tools.itemUsed) to reply.plainText()
-    }
+    } }
 
     /** Photo -> friendly NPC. Constrained JSON first; the NPC's persona then rides in a fresh tools conversation. */
-    suspend fun meet(imagePath: String, environment: String): Pair<SpawnedNpc?, String> = withContext(Dispatchers.IO) {
+    suspend fun meet(imagePath: String, environment: String): Pair<SpawnedNpc?, String> = lock.withLock { withContext(Dispatchers.IO) {
         tools.npc = null
         val prompt = buildString {
             append("Look at this photo. Turn the most prominent object into a friendly character the players can talk to: a merchant selling odd wares for XP, a sage with lore and tips, a healer, or an oddball. ")
@@ -381,10 +394,10 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
         if (result != null && viaJson == null) newConversation(" You are now ${result.name}, the ${result.role}: ${result.offer}. Stay in character.")
         Log.i(TAG, "meet took ${System.currentTimeMillis() - t0} ms; ok=${result != null}; json=${viaJson != null}")
         result to line
-    }
+    } }
 
     /** Chat with the current NPC (continues the conversation started by meet). */
-    suspend fun npcChat(playerName: String, text: String?, audioWav: ByteArray?, npcName: String, role: String, xp: Int, items: List<String>): Pair<String, Triple<Trade?, Trade?, Int>> = withContext(Dispatchers.IO) {
+    suspend fun npcChat(playerName: String, text: String?, audioWav: ByteArray?, npcName: String, role: String, xp: Int, items: List<String>): Pair<String, Triple<Trade?, Trade?, Int>> = lock.withLock { withContext(Dispatchers.IO) {
         tools.trade = null; tools.gift = null; tools.heal = 0
         val situation = buildString {
             append("You are now $npcName, the $role. Stay in character, under 40 words. $playerName has $xp XP and carries: ${items.ifEmpty { listOf("nothing") }.joinToString(", ")}. ")
@@ -396,10 +409,10 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
         if (tools.trade == null && tools.gift == null && tools.heal == 0 && reply.rawText().contains("call:")) LenientTools.recover(reply.rawText(), tools)
         Log.i(TAG, "npcChat trade=${tools.trade} gift=${tools.gift} heal=${tools.heal} | ${reply.plainText().take(80)}")
         reply.plainText() to Triple(tools.trade, tools.gift, tools.heal)
-    }
+    } }
 
     /** Free-form talk with the dungeon master while exploring. */
-    suspend fun dmChat(playerName: String, text: String?, audioWav: ByteArray?, summary: String): Pair<String, Boolean> = withContext(Dispatchers.IO) {
+    suspend fun dmChat(playerName: String, text: String?, audioWav: ByteArray?, summary: String): Pair<String, Boolean> = lock.withLock { withContext(Dispatchers.IO) {
         tools.potionRequested = false
         if (conversation == null || turns >= MAX_TURNS_PER_CONVERSATION) newConversation(" The party is exploring between fights. Answer as the dungeon master: lore, tips, banter. Under 40 words.")
         val situation = buildString {
@@ -409,19 +422,19 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
         }
         val reply = if (audioWav != null) send(Contents.of(Content.AudioBytes(audioWav), Content.Text(situation))) else send(Contents.of(situation))
         reply.plainText() to tools.potionRequested
-    }
+    } }
 
     /** The monster takes a free swing at a hesitating player. */
-    suspend fun monsterTurn(monsterName: String, targetName: String, monsterHp: Int): Strike? = withContext(Dispatchers.IO) {
+    suspend fun monsterTurn(monsterName: String, targetName: String, monsterHp: Int): Strike? = lock.withLock { withContext(Dispatchers.IO) {
         tools.strike = null
         var reply = send(Contents.of("$targetName hesitates. $monsterName (HP $monsterHp) seizes the moment and attacks them. Call monster_strike."))
         if (tools.strike == null && reply.rawText().contains("call:")) LenientTools.recover(reply.rawText(), tools)
         if (tools.strike == null) { retries++; reply = send(Contents.of("Call the monster_strike tool now.")) }
         tools.strike
-    }
+    } }
 
     /** Nearby signal names -> lore via write_omens. Uses a throwaway conversation so it doesn't pollute a battle. */
-    suspend fun omens(signals: List<String>): Pair<List<OmenText>?, String> = withContext(Dispatchers.IO) {
+    suspend fun omens(signals: List<String>): Pair<List<OmenText>?, String> = lock.withLock { withContext(Dispatchers.IO) {
         tools.omens = null
         val keep = conversation; conversation = null
         val c = newConversation()
@@ -432,14 +445,14 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
         Log.i(TAG, "omens took ${System.currentTimeMillis() - t0} ms; tool=${tools.omens != null}")
         c.close(); conversation = keep
         tools.omens to reply.plainText()
-    }
+    } }
 
     val lastPower: Pair<String, String>? get() = tools.power
     val lastItemUsed: String? get() = tools.itemUsed
     val lastPotionRequested: Boolean get() = tools.potionRequested
 
     /** Level-up: a title from how they fought. Throwaway conversation. */
-    suspend fun epithet(playerName: String, level: Int, deeds: String): String? = withContext(Dispatchers.IO) {
+    suspend fun epithet(playerName: String, level: Int, deeds: String): String? = lock.withLock { withContext(Dispatchers.IO) {
         tools.epithet = null
         val keep = conversation; conversation = null
         val c = newConversation()
@@ -449,10 +462,10 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
         }
         c.close(); conversation = keep
         tools.epithet
-    }
+    } }
 
     /** After a kill: ask for an item salvaged from the object. */
-    suspend fun loot(monsterName: String, playerName: String): Pair<Loot?, String> = withContext(Dispatchers.IO) {
+    suspend fun loot(monsterName: String, playerName: String): Pair<Loot?, String> = lock.withLock { withContext(Dispatchers.IO) {
         tools.loot = null
         val t0 = System.currentTimeMillis()
         var reply = send(Contents.of("$monsterName is defeated, $playerName landed the final blow! Call drop_loot with an item salvaged from the real object it came from, then say one triumphant line."))
@@ -460,7 +473,7 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
         if (tools.loot == null) reply = send(Contents.of("Call the drop_loot tool now."))
         Log.i(TAG, "loot took ${System.currentTimeMillis() - t0} ms; tool=${tools.loot != null}")
         tools.loot to reply.plainText()
-    }
+    } }
 
     fun close() {
         conversation?.close(); conversation = null

@@ -24,6 +24,8 @@ import com.hocmemini.raid.game.Omen
 import com.hocmemini.raid.game.Phase
 import com.hocmemini.raid.game.Player
 import com.hocmemini.raid.game.Victory
+import com.hocmemini.raid.game.Lurker
+import com.hocmemini.raid.llm.SpawnedMonster
 import com.hocmemini.raid.game.StatsStore
 import com.hocmemini.raid.game.companionCapacity
 import com.hocmemini.raid.game.headingDelta
@@ -118,6 +120,15 @@ class GameSession(private val app: Application) {
     private var windupJob: Job? = null
     /** Host: the last slain monster, bindable as a companion. */
     private var lastSlain: Monster? = null
+    /** Host: things we walked past, already turned into monsters, waiting to ambush. */
+    val lurkers = MutableStateFlow<List<Lurker>>(emptyList())
+    private var scoutJob: Job? = null
+    private var lastScoutAt = 0L
+    private var lastScoutSteps = 0
+    private var ambushAtSteps = -1
+    private val signatures = ArrayDeque<IntArray>()
+    /** The live camera, handed over by the play screen so the scout can shoot without the player. */
+    @Volatile var camera: ImageCapture? = null
 
     val models = ModelManager(app)
     /** User's explicit pick ("E2B"/"E4B"), else the recommendation. */
@@ -270,6 +281,7 @@ class GameSession(private val app: Application) {
         state.update { it.copy(phase = Phase.EXPLORE, players = it.players + (selfId to selfPlayer())).withLog("$selfName opened the raid. Walk around, then point at something.") }
         broadcast()
         sfx.loop("ambient_explore")
+        startScout()
     }
 
     fun join(name: String) {
@@ -292,6 +304,7 @@ class GameSession(private val app: Application) {
         if (recording.value) recorder.stop()
         recording.value = false
         windupJob?.cancel(); windupJob = null
+        scoutJob?.cancel(); scoutJob = null; lurkers.value = emptyList(); ambushAtSteps = -1
         runCatching { link?.stop() }; link = null
         peers.value = emptyList(); pendingAudio.clear(); pendingSprite = null
         role.value = Role.NONE; status.value = ""
@@ -377,6 +390,78 @@ class GameSession(private val app: Application) {
             Phase.EXPLORE, Phase.NPC, Phase.VICTORY, Phase.DEFEAT -> sfx.loop("ambient_explore")
             else -> sfx.stopLoop()
         }
+        if (role.value == Role.HOST) { if (phase == Phase.EXPLORE) startScout() else scoutJob?.cancel() }
+    }
+
+    // ---------- lurkers: scout while exploring, ambush later ----------
+
+    private fun startScout() {
+        scoutJob?.cancel()
+        if (ambushAtSteps < 0) ambushAtSteps = 25 + kotlin.random.Random.nextInt(35)
+        scoutJob = scope.launch {
+            while (true) {
+                delay(4000)
+                val s = state.value
+                if (s.phase != Phase.EXPLORE || role.value != Role.HOST) break
+                if (s.busy || gemma == null) continue
+                val stepsNow = steps.sinceReset.value
+                // spring an ambush once the party has walked far enough since the last fight
+                val lk = lurkers.value
+                if (lk.isNotEmpty() && stepsNow >= ambushAtSteps) { springAmbush(lk.first()); break }
+                // scout: moving, not too often, and room in the queue
+                val now = System.currentTimeMillis()
+                if (lk.size >= MAX_LURKERS || now - lastScoutAt < SCOUT_INTERVAL_MS || stepsNow - lastScoutSteps < 4) continue
+                val cam = camera ?: continue
+                lastScoutAt = now; lastScoutSteps = stepsNow
+                runCatching { scoutOnce(cam) }.onFailure { Log.w("Raid", "scout failed: ${it.message}") }
+            }
+        }
+    }
+
+    /** One silent capture: keep it only if the segmenter finds a real subject under the crosshair that we haven't seen. */
+    private suspend fun scoutOnce(cam: ImageCapture) {
+        val g = gemma ?: return
+        val path = cam.captureToFile(app)
+        val sprite = kotlinx.coroutines.withContext(Dispatchers.IO) { SpriteMaker.make(app, path, requireSubject = true) } ?: run { File(path).delete(); return }
+        val sig = kotlinx.coroutines.withContext(Dispatchers.IO) { SpriteMaker.signature(sprite) }
+        if (signatures.any { SpriteMaker.similar(it, sig) }) { sprite.delete(); File(path).delete(); return }
+        signatures.addLast(sig); while (signatures.size > 12) signatures.removeFirst()
+        Log.i("Raid", "scout: interesting thing captured, generating a lurker in the background")
+        if (state.value.phase != Phase.EXPLORE) return
+        val (sheet, _) = g.sheet(path, 0, env.describe(), null, reputation())
+        File(path).delete()
+        if (sheet == null || state.value.phase != Phase.EXPLORE) return
+        val l = Lurker(sheet.name, sheet.hp, sheet.attacks, sheet.weakness, sheet.flavor, sheet.emoji, sheet.accessories, sheet.taunt, sprite.name, System.currentTimeMillis())
+        lurkers.value = (lurkers.value + l).takeLast(MAX_LURKERS)
+        statsStore.update { it.copy(lurkersSeen = it.lurkersSeen + 1) }
+        state.update { it.copy(lurking = lurkers.value.size).withLog("👁 Something you walked past is now following you… (${lurkers.value.size} lurking)") }
+        sfx.play("omen", volume = 0.5f)
+        buzz(20, 80, 20)
+        broadcast()
+    }
+
+    private suspend fun springAmbush(l: Lurker) {
+        val g = gemma ?: return
+        lurkers.value = lurkers.value - l
+        ambushAtSteps = -1
+        val bearing = compass.heading.value
+        val loc = locator.location.value
+        val sheet = SpawnedMonster(l.name, l.hp, l.attacks, l.weakness, l.flavor, l.emoji, l.accessories, l.taunt.ifBlank { "YOU WALKED RIGHT PAST ME" })
+        state.update { it.copy(busy = true) }; broadcast()
+        runCatching { g.beginBattle(sheet, ambush = true) }
+        val hp = l.hp * 2 / 2
+        val m = Monster(l.name, hp, hp, l.attacks, l.weakness, l.flavor, bearing, loc?.latitude ?: 0.0, loc?.longitude ?: 0.0, loc?.accuracy ?: 999f, l.emoji, l.accessories, l.sprite)
+        steps.reset(); fightStartedAt = System.currentTimeMillis()
+        journalMark("⚡ AMBUSH · ${m.emoji} ${m.name}")
+        statsStore.update { it.copy(spawns = it.spawns + 1, ambushes = it.ambushes + 1) }
+        state.update {
+            it.copy(phase = Phase.BATTLE, monster = m, busy = false, turn = 0, steps = 0, env = env.summary.value, parries = emptyList(), windup = 20, monsterDazed = false, recastUsed = false, victory = null, ambush = true, lurking = lurkers.value.size,
+                fx = Fx(nextSeq(it), label = "spawn", taunt = sheet.taunt))
+                .withLog("⚡ AMBUSH! ${m.emoji} ${m.name} was following you. ${m.flavor}")
+        }
+        buzz(80, 40, 80, 40, 160); onPhaseChanged(Phase.BATTLE); startWindup()
+        broadcast()
+        sendSprite(m.sprite)
     }
 
     // ---------- stats & sound from the synced Fx stream (both roles) ----------
@@ -571,7 +656,7 @@ class GameSession(private val app: Application) {
             journalMark("${m.emoji} ${m.name}")
             statsStore.update { it.copy(spawns = it.spawns + 1, spawnMs = it.spawnMs + (System.currentTimeMillis() - t0), stepsWalked = it.stepsWalked + walked, toolRetries = g.retries) }
             state.update {
-                var s = it.copy(phase = Phase.BATTLE, monster = m, busy = false, turn = 0, steps = 0, env = env.summary.value, parries = emptyList(), bossLair = null, windup = 0, monsterDazed = false, recastUsed = false, victory = null, fx = Fx(nextSeq(it), label = "spawn", taunt = spawned.taunt))
+                var s = it.copy(phase = Phase.BATTLE, monster = m, busy = false, turn = 0, steps = 0, env = env.summary.value, parries = emptyList(), bossLair = null, windup = 0, monsterDazed = false, recastUsed = false, victory = null, ambush = false, fx = Fx(nextSeq(it), label = "spawn", taunt = spawned.taunt))
                     .withLog("${m.emoji} ${m.name} appears! ${m.flavor}")
                 if (lair != null) s = s.withLog("👑 BOSS FIGHT — champion of ${lair.name}. Double XP.")
                 if (bonus > 0) s = s.withLog("It grew +$bonus HP from the $walked steps you walked.")
@@ -973,7 +1058,8 @@ class GameSession(private val app: Application) {
         if (state.value.phase == Phase.BATTLE) recordEncounter(state.value, "fled")
         windupJob?.cancel()
         steps.reset()
-        state.update { s -> s.copy(phase = Phase.EXPLORE, monster = null, steps = 0, fx = null, windup = 0, victory = null, players = s.players.mapValues { (_, p) -> p.copy(hp = maxOf(p.hp, p.maxHp / 2), potions = maxOf(p.potions, 1)) }).withLog("The party regroups. Walk around, then point at something new.") }
+        ambushAtSteps = -1
+        state.update { s -> s.copy(phase = Phase.EXPLORE, monster = null, steps = 0, fx = null, windup = 0, victory = null, ambush = false, players = s.players.mapValues { (_, p) -> p.copy(hp = maxOf(p.hp, p.maxHp / 2), potions = maxOf(p.potions, 1)) }).withLog("The party regroups. Walk around, then point at something new.") }
         onPhaseChanged(Phase.EXPLORE); broadcast()
     }
 
@@ -1045,5 +1131,7 @@ class GameSession(private val app: Application) {
         const val COMPANION_DMG = 4
         const val MERCHANT_MIN_PRICE = 20
         const val ESCAPE_BASE = 0.35f
+        const val MAX_LURKERS = 3
+        const val SCOUT_INTERVAL_MS = 15_000L
     }
 }
