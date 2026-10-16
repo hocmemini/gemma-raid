@@ -29,6 +29,7 @@ import com.hocmemini.raid.game.maxHpFor
 import com.hocmemini.raid.game.powerUnlockedAt
 import com.hocmemini.raid.game.powersFor
 import com.hocmemini.raid.llm.Gemma
+import com.hocmemini.raid.llm.ModelManager
 import com.hocmemini.raid.net.NearbyLink
 import com.hocmemini.raid.net.SignalScanner
 import com.hocmemini.raid.sensors.Compass
@@ -114,8 +115,12 @@ class GameSession(private val app: Application) {
     /** Host: the last slain monster, bindable as a companion. */
     private var lastSlain: Monster? = null
 
-    val modelFile: File get() = File(app.filesDir, MODEL_NAME)
-    val modelPresent = MutableStateFlow(modelFile.exists())
+    val models = ModelManager(app)
+    val modelChoice = MutableStateFlow(models.best())
+    val modelPresent = MutableStateFlow(modelChoice.value != null)
+    val modelInfo: String get() = models.why(modelChoice.value)
+    val modelFile: File get() = modelChoice.value?.file ?: File(app.filesDir, MODEL_NAME)
+    private fun rescanModels() { modelChoice.value = models.best(); modelPresent.value = modelChoice.value != null }
     private val json = kotlinx.serialization.json.Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     /** Your character (xp, level, items, potions, epithet, companions) survives between raids. */
@@ -160,23 +165,48 @@ class GameSession(private val app: Application) {
 
     // ---------- model ----------
 
-    fun loadModel(useGpu: Boolean) {
-        if (gemmaReady.value || gemmaLoading.value || !modelFile.exists()) return
+    /** Loads the best model on the best backend; if the GPU/NPU init fails, retries on CPU without asking. */
+    fun loadModel(forceCpu: Boolean = false) {
+        if (gemmaReady.value || gemmaLoading.value) return
+        rescanModels()
+        val choice = models.best(forceCpu) ?: run { gemmaStatus.value = "no model file on this phone"; return }
         gemmaLoading.value = true
         scope.launch {
-            runCatching {
-                val g = Gemma(modelFile.absolutePath, useGpu)
+            val ok = runCatching {
+                val g = Gemma(choice.file.absolutePath, choice.backend, choice.backendName)
                 g.load { gemmaStatus.value = it }
-                gemma = g
-                gemmaReady.value = true
-            }.onFailure { gemmaStatus.value = "load failed: ${it.message}" }
+                gemma = g; gemmaReady.value = true
+            }.isSuccess
+            if (!ok && !forceCpu) {
+                gemmaStatus.value = "${choice.backendName} init failed — falling back to CPU"
+                runCatching {
+                    val cpu = models.best(forceCpu = true)!!
+                    val g = Gemma(cpu.file.absolutePath, cpu.backend, "CPU")
+                    g.load { gemmaStatus.value = it }
+                    gemma = g; gemmaReady.value = true
+                }.onFailure { gemmaStatus.value = "load failed: ${it.message?.take(120)}" }
+            } else if (!ok) gemmaStatus.value = "load failed on CPU"
             gemmaLoading.value = false
         }
     }
 
+    /** Fetch a model straight from Hugging Face on the phone (internet needed once). */
+    fun downloadModel(variant: String) = scope.launch {
+        if (gemmaLoading.value) return@launch
+        gemmaLoading.value = true
+        gemmaStatus.value = "starting download of Gemma 4 $variant…"
+        val ok = runCatching {
+            val id = models.startDownload(variant)
+            models.awaitDownload(id) { gemmaStatus.value = it }
+        }.getOrDefault(false)
+        gemmaLoading.value = false
+        if (ok) { gemmaStatus.value = "downloaded Gemma 4 $variant"; rescanModels(); loadModel() }
+    }
+
     fun importModel(uri: Uri) = scope.launch(Dispatchers.IO) {
         runCatching {
-            val tmp = File(modelFile.path + ".part")
+            val picked = runCatching { app.contentResolver.query(uri, null, null, null, null)?.use { c -> if (c.moveToFirst()) c.getString(c.getColumnIndexOrThrow(android.provider.OpenableColumns.DISPLAY_NAME)) else null } }.getOrNull()
+            val tmp = File(app.filesDir, (picked?.takeIf { it.endsWith(".litertlm") } ?: MODEL_NAME) + ".part")
             app.contentResolver.openInputStream(uri)!!.use { input ->
                 tmp.outputStream().use { out ->
                     val buf = ByteArray(1 shl 20); var total = 0L
@@ -187,8 +217,10 @@ class GameSession(private val app: Application) {
                     }
                 }
             }
-            tmp.renameTo(modelFile); modelPresent.value = true
-            gemmaStatus.value = "model copied (${modelFile.length() shr 20} MB)"
+            tmp.renameTo(File(app.filesDir, tmp.name.removeSuffix(".part")))
+            rescanModels()
+            gemmaStatus.value = "model copied"
+            loadModel()
         }.onFailure { gemmaStatus.value = "copy failed: ${it.message}" }
     }
 

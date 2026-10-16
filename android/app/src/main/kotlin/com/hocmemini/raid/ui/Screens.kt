@@ -122,8 +122,9 @@ fun LobbyScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit) {
     val status by vm.status.collectAsState()
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let(vm::importModel) }
 
-    // Hosting needs the model; start loading it on GPU as soon as the file is there.
-    LaunchedEffect(modelPresent) { if (modelPresent) vm.loadModel(useGpu = true) }
+    // Hosting needs the model: auto-pick the strongest file and fastest backend, load immediately.
+    LaunchedEffect(modelPresent) { if (modelPresent) vm.loadModel() }
+    var advanced by remember { mutableStateOf(false) }
 
     Column(
         Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp).verticalScroll(rememberScrollState()),
@@ -135,16 +136,30 @@ fun LobbyScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit) {
         OutlinedTextField(name, { name = it }, label = { Text("Your name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
 
         Card {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Gemma 4 E2B · on-device", fontWeight = FontWeight.Bold)
-                Text(if (modelPresent) "model file present" else "model file missing — pick the .litertlm you downloaded, or push it with adb")
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton({ picker.launch(arrayOf("*/*")) }, enabled = !gemmaLoading) { Text("Pick file") }
-                    Button({ vm.loadModel(true) }, enabled = modelPresent && !gemmaReady && !gemmaLoading) { Text("Load on GPU") }
-                    TextButton({ vm.loadModel(false) }, enabled = modelPresent && !gemmaReady && !gemmaLoading) { Text("CPU") }
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        when {
+                            gemmaReady -> "🧠 Dungeon master $gemmaStatus"
+                            gemmaLoading -> "🧠 $gemmaStatus"
+                            modelPresent -> "🧠 ready to load"
+                            else -> "🧠 no model on this phone yet"
+                        }, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f),
+                    )
+                    TextButton({ advanced = !advanced }) { Text(if (advanced) "Less" else "Advanced") }
                 }
+                Text(vm.modelInfo, style = MaterialTheme.typography.bodySmall, color = Dungeon.parchment.copy(alpha = 0.8f))
                 if (gemmaLoading) LinearProgressIndicator(Modifier.fillMaxWidth())
-                Text(gemmaStatus, style = MaterialTheme.typography.bodySmall)
+                if (advanced) {
+                    Text("Files: " + vm.models.candidates().joinToString { "${it.name} (${it.length() shr 20} MB)" }.ifBlank { "none" }, style = MaterialTheme.typography.bodySmall)
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton({ picker.launch(arrayOf("*/*")) }, enabled = !gemmaLoading) { Text("Pick file") }
+                        OutlinedButton({ vm.downloadModel("E2B") }, enabled = !gemmaLoading) { Text("Get E2B · 2.6 GB") }
+                        OutlinedButton({ vm.downloadModel("E4B") }, enabled = !gemmaLoading) { Text("Get E4B · 3.7 GB") }
+                    }
+                    if (!gemmaReady) TextButton({ vm.loadModel(forceCpu = true) }, enabled = modelPresent && !gemmaLoading) { Text("Force CPU (debug)") }
+                    Text("This phone: ${vm.models.soc}, ${"%.0f".format(vm.models.totalGb)} GB RAM. NPU builds exist for Tensor G5/G6 only; everything else runs on the GPU, and CPU is the automatic fallback if the GPU init fails.", style = MaterialTheme.typography.bodySmall)
+                }
             }
         }
 

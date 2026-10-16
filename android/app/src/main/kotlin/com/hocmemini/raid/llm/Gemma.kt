@@ -165,7 +165,7 @@ class GameTools : ToolSet {
 }
 
 /** Thin wrapper over LiteRT-LM running Gemma 4 E2B fully on-device. */
-class Gemma(private val modelPath: String, private val useGpu: Boolean) {
+class Gemma(private val modelPath: String, private val backend: Backend, private val backendName: String) {
     private var engine: Engine? = null
     private var conversation: Conversation? = null
     private var turns = 0
@@ -175,14 +175,13 @@ class Gemma(private val modelPath: String, private val useGpu: Boolean) {
 
     suspend fun load(onStatus: (String) -> Unit) = withContext(Dispatchers.IO) {
         Engine.setNativeMinLogSeverity(LogSeverity.ERROR)
-        val backend = if (useGpu) Backend.GPU() else Backend.CPU()
-        onStatus("Loading Gemma 4 E2B on ${if (useGpu) "GPU" else "CPU"}…")
+        onStatus("Loading on $backendName…")
         val t0 = System.currentTimeMillis()
         val e = Engine(
             EngineConfig(
                 modelPath = modelPath,
                 backend = backend,
-                visionBackend = backend,
+                visionBackend = if (backendName == "NPU") Backend.GPU() else backend,
                 audioBackend = Backend.CPU(),
                 maxNumTokens = 4096,
                 maxNumImages = 1,
@@ -191,8 +190,8 @@ class Gemma(private val modelPath: String, private val useGpu: Boolean) {
         e.initialize()
         engine = e
         val secs = (System.currentTimeMillis() - t0) / 1000
-        Log.i(TAG, "engine ready in ${secs}s (gpu=$useGpu)")
-        onStatus("Gemma ready in ${secs}s")
+        Log.i(TAG, "engine ready in ${secs}s ($backendName)")
+        onStatus("ready in ${secs}s on $backendName")
     }
 
     private fun newConversation(extraSystem: String = ""): Conversation {
