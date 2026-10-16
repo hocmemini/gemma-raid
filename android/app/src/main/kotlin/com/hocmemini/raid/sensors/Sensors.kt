@@ -92,7 +92,8 @@ class StepCounter(context: Context) : SensorEventListener {
         counter?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL) }
     }
     fun stop() = sm.unregisterListener(this)
-    fun reset() { detected = 0; base = latest; _sinceReset.value = 0 }
+    /** Baseline on the latest hardware reading; if none has arrived yet, leave it unset so the first reading becomes the baseline. */
+    fun reset() { detected = 0; base = if (latest > 0f) latest else -1f; _sinceReset.value = 0 }
 
     override fun onSensorChanged(e: SensorEvent) {
         when (e.sensor) {
