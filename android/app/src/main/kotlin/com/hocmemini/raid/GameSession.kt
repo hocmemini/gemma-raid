@@ -29,6 +29,7 @@ import com.hocmemini.raid.game.maxHpFor
 import com.hocmemini.raid.game.powerUnlockedAt
 import com.hocmemini.raid.game.powersFor
 import com.hocmemini.raid.llm.Gemma
+import com.hocmemini.raid.llm.clean
 import com.hocmemini.raid.llm.ModelManager
 import com.hocmemini.raid.net.NearbyLink
 import com.hocmemini.raid.net.SignalScanner
@@ -635,7 +636,8 @@ class GameSession(private val app: Application) {
         if (state.value.busy) return
         state.update { it.copy(busy = true).withLog("${p.name}: ${text ?: "🎤 (asks the DM)"}") }; broadcast()
         val summary = state.value.players.values.joinToString("; ") { "${it.name} L${it.level} ${it.hp}/${it.maxHp} HP, ${it.potions} potions, items: ${it.items.ifEmpty { listOf(Item("none")) }.joinToString()}" } + "; kills ${state.value.kills}"
-        val (reply, potion) = runCatching { g.dmChat(p.name, text, audioWav, summary) }.getOrElse { "" to false }
+        val (reply0, potion) = runCatching { g.dmChat(p.name, text, audioWav, summary) }.getOrElse { "" to false }
+        val reply = reply0.clean()
         state.update { s ->
             var me = s.players[p.id] ?: p
             var healed = 0
@@ -655,7 +657,8 @@ class GameSession(private val app: Application) {
         val p = s0.players[playerId] ?: return
         if (s0.busy) return
         state.update { it.copy(busy = true).withLog("${p.name}: ${text ?: "🎤 (speaks)"}") }; broadcast()
-        val (reply, effects) = runCatching { g.npcChat(p.name, text, audioWav, npc.name, npc.role, p.xp, p.items.map { it.toString() }) }.getOrElse { "" to Triple(null, null, 0) }
+        val (reply0, effects) = runCatching { g.npcChat(p.name, text, audioWav, npc.name, npc.role, p.xp, p.items.map { it.toString() }) }.getOrElse { "" to Triple(null, null, 0) }
+        val reply = reply0.clean()
         val (trade, gift, heal) = effects
         state.update { s ->
             var me = s.players[p.id] ?: p

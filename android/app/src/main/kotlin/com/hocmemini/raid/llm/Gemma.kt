@@ -34,6 +34,13 @@ data class Trade(val item: String, val effect: String, val priceXp: Int, val dis
  * The tools Gemma 4 calls. LiteRT-LM runs them automatically mid-generation; they just stash
  * their arguments so the game loop can read structured results after sendMessage returns.
  */
+/** Remove Gemma's tool-call markup if it leaks into prose: <|tool_call>...<tool_call|> blocks and <|"|> quote tokens. */
+fun String.clean(): String = this
+    .replace(Regex("<\\|tool_call>.*?(<tool_call\\|>|$)", RegexOption.DOT_MATCHES_ALL), " ")
+    .replace(Regex("call:\\w+\\{.*?(\\}|$)", RegexOption.DOT_MATCHES_ALL), " ")
+    .replace("<|\"|>", "\"").replace("|\"|>", "").replace("<|\"|", "").replace("<|", "").replace("|>", "")
+    .replace(Regex("\\s+"), " ").trim().trim('"')
+
 fun splitList(s: String): List<String> = s.split(",", ";", "\n").map { it.trim().trim('"', '\'') }.filter { it.isNotBlank() }.take(4)
 fun splitEmoji(s: String): List<String> = s.split(" ", ",").map { it.trim() }.filter { it.isNotBlank() }.map { it.take(4) }.take(3)
 
@@ -60,7 +67,7 @@ class GameTools : ToolSet {
 
     @Tool(description = "Grant the player an epithet (title) earned by how they fight. Call exactly once.")
     fun grant_epithet(@ToolParam(description = "Three to five words, e.g. 'the Lemon-Juicer' or 'Scourge of Staplers'") title: String): Map<String, Any> {
-        epithet = title.take(40); return mapOf("ok" to true)
+        epithet = title.clean().take(40); return mapOf("ok" to true)
     }
 
     @Tool(description = "Turn the real-world object in the photo into a FRIENDLY non-player character the players can talk to. Call exactly once.")
@@ -79,24 +86,24 @@ class GameTools : ToolSet {
 
     @Tool(description = "The monster attacks a player on its own because they hesitated. Call exactly once.")
     fun monster_strike(
-        @ToolParam(description = "Damage dealt to the player, 1 to 8") damageToPlayer: Int,
+        @ToolParam(description = "Damage dealt to the player, 1 to 8") damage_to_player: Int,
         @ToolParam(description = "One punchy sentence describing the attack, in second person") narration: String,
         @ToolParam(description = "What the monster shouts, ALL CAPS, under 8 words") taunt: String,
     ): Map<String, Any> {
-        strike = Strike(damageToPlayer.coerceIn(1, 12), narration, taunt.take(60)); return mapOf("ok" to true)
+        strike = Strike(damage_to_player.coerceIn(1, 12), narration.clean(), taunt.clean().take(60)); return mapOf("ok" to true)
     }
 
     @Tool(description = "An NPC merchant offers to sell the player an item for XP. Call when the player wants to buy or asks what is for sale. The price in this call is the real price; quote exactly it in your words.")
     fun sell_item(
         @ToolParam(description = "Item name") name: String,
         @ToolParam(description = "One short sentence: what it does in a fight") effect: String,
-        @ToolParam(description = "Base price in XP, 20 to 150") priceXp: Int,
-        @ToolParam(description = "Haggling: 0 to 50 percent off, earned by charm, wit or credible intimidation; 0 if the player was rude or boring") discountPercent: Int,
+        @ToolParam(description = "Base price in XP, 20 to 150") price_xp: Int,
+        @ToolParam(description = "Haggling: 0 to 50 percent off, earned by charm, wit or credible intimidation; 0 if the player was rude or boring") discount_percent: Int,
     ): Map<String, Any> {
-        val d = discountPercent.coerceIn(0, 50)
-        val final = (priceXp.coerceIn(10, 300) * (100 - d) / 100).coerceAtLeast(5)
-        trade = Trade(name.take(40), effect.take(120), final, d)
-        Log.i("Gemma", "sell_item $name base=$priceXp discount=$d% -> $final")
+        val d = discount_percent.coerceIn(0, 50)
+        val final = (price_xp.coerceIn(10, 300) * (100 - d) / 100).coerceAtLeast(5)
+        trade = Trade(name.clean().take(40), effect.clean().take(120), final, d)
+        Log.i("Gemma", "sell_item $name base=$price_xp discount=$d% -> $final")
         return mapOf("ok" to true, "finalPriceXp" to final)
     }
 
@@ -104,7 +111,7 @@ class GameTools : ToolSet {
     fun give_item(
         @ToolParam(description = "Item name") name: String,
         @ToolParam(description = "One short sentence: what it does in a fight") effect: String,
-    ): Map<String, Any> { gift = Trade(name.take(40), effect.take(120), 0); return mapOf("ok" to true) }
+    ): Map<String, Any> { gift = Trade(name.clean().take(40), effect.clean().take(120), 0); return mapOf("ok" to true) }
 
     @Tool(description = "A healer NPC restores the player's health. Call when the player asks to be healed.")
     fun heal_player(@ToolParam(description = "HP restored, 5 to 30") amount: Int): Map<String, Any> { heal = amount.coerceIn(1, 40); return mapOf("ok" to true) }
@@ -128,21 +135,21 @@ class GameTools : ToolSet {
         @ToolParam(description = "Two or three single emoji to draw onto the real object as its features, separated by spaces, e.g. 👀 🗡️ 🔥") accessories: String,
         @ToolParam(description = "One short line the monster shouts at the players as it appears, ALL CAPS, under 8 words") taunt: String,
     ): Map<String, Any> {
-        spawned = SpawnedMonster(name, hp.coerceIn(10, 80), splitList(attacks), weakness, flavor, emoji.take(4).ifBlank { "👾" }, splitEmoji(accessories), taunt.take(60))
+        spawned = SpawnedMonster(name.clean(), hp.coerceIn(10, 80), splitList(attacks.clean()), weakness.clean(), flavor.clean(), emoji.clean().take(4).ifBlank { "👾" }, splitEmoji(accessories.clean()), taunt.clean().take(60))
         Log.i("Gemma", "spawn_monster $name hp=$hp weak=$weakness attacks=$attacks | $flavor")
         return mapOf("ok" to true)
     }
 
     @Tool(description = "Resolve one player's action against the monster. Call exactly once per action.")
     fun resolve_action(
-        @ToolParam(description = "Damage this action deals to the monster, 0 to 15. Use the top of the range if it exploits the weakness or a carried item, 0 if it is nonsense or cowardly.") damageToMonster: Int,
-        @ToolParam(description = "Damage the monster deals back to this player, 0 to 8") damageToPlayer: Int,
+        @ToolParam(description = "Damage this action deals to the monster, 0 to 15. Use the top of the range if it exploits the weakness or a carried item, 0 if it is nonsense or cowardly.") damage_to_monster: Int,
+        @ToolParam(description = "Damage the monster deals back to this player, 0 to 8") damage_to_player: Int,
         @ToolParam(description = "One or two punchy sentences narrating the exchange in second person. Describe the blow and its effect; never say the monster or player is dead or defeated.") narration: String,
         @ToolParam(description = "Style rating. 1 = boring, vague or repeated. 2 = plain attack. 3 = decent, fits the monster. 4 = clever or funny, uses the weakness or an item well. 5 = rare: a genuinely inspired, hilarious, object-specific idea nobody expected. Most actions are 2 or 3; give 5 at most once in a few turns.") style: Int,
         @ToolParam(description = "One short line the monster shouts back at the player, ALL CAPS, under 8 words, e.g. TAKE THAT, INTREPID FOOL") taunt: String,
     ): Map<String, Any> {
-        resolved = Resolved(damageToMonster.coerceIn(0, 30), damageToPlayer.coerceIn(0, 12), narration, style.coerceIn(1, 5), taunt.take(60))
-        Log.i("Gemma", "resolve_action dmg=$damageToMonster hurt=$damageToPlayer style=$style | $narration")
+        resolved = Resolved(damage_to_monster.coerceIn(0, 30), damage_to_player.coerceIn(0, 12), narration.clean(), style.coerceIn(1, 5), taunt.clean().take(60))
+        Log.i("Gemma", "resolve_action dmg=$damage_to_monster hurt=$damage_to_player style=$style | ${narration.clean()}")
         return mapOf("ok" to true)
     }
 
@@ -162,7 +169,7 @@ class GameTools : ToolSet {
         @ToolParam(description = "Short item name, e.g. 'Cable of Binding'") name: String,
         @ToolParam(description = "One short sentence: what it does in future fights") effect: String,
     ): Map<String, Any> {
-        loot = Loot(name.take(40), effect.take(120))
+        loot = Loot(name.clean().take(40), effect.clean().take(120))
         return mapOf("ok" to true)
     }
 }
@@ -334,9 +341,13 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
         val t0 = System.currentTimeMillis()
         var reply = if (audioWav != null) send(Contents.of(Content.AudioBytes(audioWav), Content.Text(situation)))
                     else send(Contents.of(situation))
+        if (tools.resolved == null && reply.rawText().contains("call:")) {
+            if (LenientTools.recover(reply.rawText(), tools)) Log.w(TAG, "resolve_action recovered from visible call text")
+        }
         if (tools.resolved == null) {
-            Log.w(TAG, "no resolve_action call (model said: ${reply.plainText().take(120)}); retrying once"); retries++
+            Log.w(TAG, "no resolve_action call (model said: ${reply.rawText().take(120)}); retrying once"); retries++
             reply = send(Contents.of("You must call the resolve_action tool for that action now, then reply in one sentence."))
+            if (tools.resolved == null && reply.rawText().contains("call:")) LenientTools.recover(reply.rawText(), tools)
         }
         Log.i(TAG, "resolve took ${System.currentTimeMillis() - t0} ms; tool=${tools.resolved != null}; audio=${audioWav != null}; potion=${tools.potionRequested}; item=${tools.itemUsed}")
         tools.resolved?.copy(drankPotion = tools.potionRequested, usedItem = tools.itemUsed) to reply.plainText()
@@ -378,6 +389,7 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
             if (audioWav != null) append("$playerName speaks in the attached audio.") else append("$playerName says: \"$text\"")
         }
         val reply = if (audioWav != null) send(Contents.of(Content.AudioBytes(audioWav), Content.Text(situation))) else send(Contents.of(situation))
+        if (tools.trade == null && tools.gift == null && tools.heal == 0 && reply.rawText().contains("call:")) LenientTools.recover(reply.rawText(), tools)
         Log.i(TAG, "npcChat trade=${tools.trade} gift=${tools.gift} heal=${tools.heal} | ${reply.plainText().take(80)}")
         reply.plainText() to Triple(tools.trade, tools.gift, tools.heal)
     }
@@ -399,6 +411,7 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
     suspend fun monsterTurn(monsterName: String, targetName: String, monsterHp: Int): Strike? = withContext(Dispatchers.IO) {
         tools.strike = null
         var reply = send(Contents.of("$targetName hesitates. $monsterName (HP $monsterHp) seizes the moment and attacks them. Call monster_strike."))
+        if (tools.strike == null && reply.rawText().contains("call:")) LenientTools.recover(reply.rawText(), tools)
         if (tools.strike == null) { retries++; reply = send(Contents.of("Call the monster_strike tool now.")) }
         tools.strike
     }
@@ -437,6 +450,7 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
         tools.loot = null
         val t0 = System.currentTimeMillis()
         var reply = send(Contents.of("$monsterName is defeated, $playerName landed the final blow! Call drop_loot with an item salvaged from the real object it came from, then say one triumphant line."))
+        if (tools.loot == null && reply.rawText().contains("call:")) LenientTools.recover(reply.rawText(), tools)
         if (tools.loot == null) reply = send(Contents.of("Call the drop_loot tool now."))
         Log.i(TAG, "loot took ${System.currentTimeMillis() - t0} ms; tool=${tools.loot != null}")
         tools.loot to reply.plainText()
@@ -447,8 +461,8 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
         engine?.close(); engine = null
     }
 
-    private fun Message.plainText(): String =
-        contents.contents.filterIsInstance<Content.Text>().joinToString("") { it.text }.trim()
+    private fun Message.rawText(): String = contents.contents.filterIsInstance<Content.Text>().joinToString("") { it.text }.trim()
+    private fun Message.plainText(): String = rawText().clean()
 
     companion object {
         private const val TAG = "Gemma"
@@ -466,26 +480,39 @@ Call spawn_monster with a name, hp, attacks, a weakness, flavor text, an emoji, 
 }
 
 
-/** Pulls `call:tool{key:<|"|>value<|"|>,n:12,...}` apart without caring about a missing quote token here or there. */
+/** Pulls `call:tool{key:<|"|>value<|"|>,n:12,...}` apart without caring about a missing quote token or snake_case keys. */
 object LenientTools {
-    private val Q = "<|\"|>"
+    private const val QT = "<|\"|>"
+    private val Q = Regex.escape(QT)
+
+    private fun variants(key: String): List<String> {
+        val snake = key.replace(Regex("([a-z])([A-Z])")) { "${it.groupValues[1]}_${it.groupValues[2].lowercase()}" }
+        val camel = key.replace(Regex("_([a-z])")) { it.groupValues[1].uppercase() }
+        return listOf(key, snake, camel).distinct()
+    }
 
     fun recover(raw: String, t: GameTools): Boolean {
         val m = Regex("call:(\\w+)\\{(.*)", RegexOption.DOT_MATCHES_ALL).find(raw) ?: return false
         val tool = m.groupValues[1]
         val body = m.groupValues[2].substringBeforeLast("}")
         fun str(key: String): String {
-            val r = Regex("(?:^|[,{\\s])$key:\\s*(?:$Q)?(.*?)(?:$Q)?\\s*(?=,\\s*\\w+:|$)", RegexOption.DOT_MATCHES_ALL).find(body) ?: return ""
-            return r.groupValues[1].replace(Q, "\"").trim().trim('"', '[', ']').trim()
+            for (k in variants(key)) {
+                val r = Regex("(?:^|[,{\\s])" + Regex.escape(k) + ":\\s*(?:" + Q + ")?(.*?)(?:" + Q + ")?\\s*(?=,\\s*\\w+:|$)", RegexOption.DOT_MATCHES_ALL).find(body)
+                if (r != null) return r.groupValues[1].replace(QT, "\"").trim().trim('"', '[', ']').trim()
+            }
+            return ""
         }
-        fun int(key: String, def: Int): Int = Regex("$key:\\s*(\\d+)").find(body)?.groupValues?.get(1)?.toIntOrNull() ?: def
+        fun int(key: String, def: Int): Int {
+            for (k in variants(key)) Regex(Regex.escape(k) + ":\\s*(\\d+)").find(body)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
+            return def
+        }
         return when (tool) {
             "spawn_monster" -> { t.spawn_monster(str("name").ifBlank { "The Thing" }, int("hp", 30), str("attacks").replace("\"", ","), str("weakness").ifBlank { "a clever idea" }, str("flavor"), str("emoji").ifBlank { "👾" }, str("accessories").replace("\"", " "), str("taunt")); true }
-            "resolve_action" -> { t.resolve_action(int("damageToMonster", 4), int("damageToPlayer", 2), str("narration").ifBlank { "The blow lands, more or less." }, int("style", 3), str("taunt")); true }
+            "resolve_action" -> { t.resolve_action(int("damage_to_monster", 4), int("damage_to_player", 2), str("narration").ifBlank { "The blow lands, more or less." }, int("style", 3), str("taunt")); true }
             "spawn_npc" -> { t.spawn_npc(str("name").ifBlank { "A Stranger" }, str("role").ifBlank { "oddball" }, str("emoji").ifBlank { "🙂" }, str("accessories").replace("\"", " "), str("greeting"), str("offer")); true }
             "drop_loot" -> { t.drop_loot(str("name").ifBlank { "a curious trinket" }, str("effect")); true }
-            "monster_strike" -> { t.monster_strike(int("damageToPlayer", 3), str("narration"), str("taunt")); true }
-            "sell_item" -> { t.sell_item(str("name"), str("effect"), int("priceXp", 50), int("discountPercent", 0)); true }
+            "monster_strike" -> { t.monster_strike(int("damage_to_player", 3), str("narration"), str("taunt")); true }
+            "sell_item" -> { t.sell_item(str("name"), str("effect"), int("price_xp", 50), int("discount_percent", 0)); true }
             "give_item" -> { t.give_item(str("name"), str("effect")); true }
             "heal_player" -> { t.heal_player(int("amount", 10)); true }
             "use_power" -> { t.use_power(str("power"), str("argument")); true }
