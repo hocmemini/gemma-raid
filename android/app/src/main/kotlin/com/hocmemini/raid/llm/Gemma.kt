@@ -20,7 +20,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 data class SpawnedMonster(val name: String, val hp: Int, val attacks: List<String>, val weakness: String, val flavor: String, val emoji: String, val accessories: List<String>, val taunt: String)
-data class Resolved(val damageToMonster: Int, val damageToPlayer: Int, val narration: String, val style: Int, val taunt: String)
+data class Resolved(val damageToMonster: Int, val damageToPlayer: Int, val narration: String, val style: Int, val taunt: String, val drankPotion: Boolean = false, val usedItem: String? = null)
 data class Loot(val name: String, val effect: String)
 data class OmenText(val name: String, val lore: String, val threat: Int)
 
@@ -33,6 +33,16 @@ class GameTools : ToolSet {
     @Volatile var resolved: Resolved? = null
     @Volatile var loot: Loot? = null
     @Volatile var omens: List<OmenText>? = null
+    @Volatile var potionRequested = false
+    @Volatile var itemUsed: String? = null
+
+    @Tool(description = "The player drinks a healing potion. Call this when the player says they drink, quaff, chug or use a potion, in addition to resolve_action.")
+    fun drink_potion(): Map<String, Any> { potionRequested = true; return mapOf("ok" to true) }
+
+    @Tool(description = "The player uses one of the items they carry, by name. Call this when the player invokes a carried item, in addition to resolve_action.")
+    fun use_item(@ToolParam(description = "The item name as listed in what the player carries") name: String): Map<String, Any> {
+        itemUsed = name.take(60); return mapOf("ok" to true)
+    }
 
     @Tool(description = "Turn the real-world object or scene in the photo into the monster the players must fight. Call exactly once.")
     fun spawn_monster(
@@ -178,14 +188,16 @@ class Gemma(private val modelPath: String, private val useGpu: Boolean) {
         facing: Boolean,
         flanking: Boolean,
         items: List<String>,
+        potions: Int,
     ): Pair<Resolved?, String> = withContext(Dispatchers.IO) {
-        tools.resolved = null
+        tools.resolved = null; tools.potionRequested = false; tools.itemUsed = null
         if (turns >= MAX_TURNS_PER_CONVERSATION) {
             newConversation(" A battle is in progress: $monsterName (HP $monsterHp, weak to $weakness) fights the players.")
         }
         val situation = buildString {
             append("$playerName acts against $monsterName (HP $monsterHp, weak to: $weakness). ")
-            if (items.isNotEmpty()) append("$playerName carries: ${items.joinToString(", ")}. An item that fits the action makes it stronger. ")
+            if (items.isNotEmpty()) append("$playerName carries: ${items.joinToString(", ")}. If they use one by name, also call use_item. ")
+            if (potions > 0) append("$playerName has $potions healing potion${if (potions > 1) "s" else ""}; if they say they drink one, also call drink_potion. ")
             if (!facing) append("They are NOT facing the monster, so the action mostly misses. ")
             if (flanking) append("Another player is attacking from a different side, so this is a flanking strike. ")
             if (audioWav != null) append("Their action is spoken in the attached audio clip. ")
@@ -199,8 +211,8 @@ class Gemma(private val modelPath: String, private val useGpu: Boolean) {
             Log.w(TAG, "no resolve_action call; retrying once"); retries++
             reply = send(Contents.of("You must call the resolve_action tool for that action now, then reply in one sentence."))
         }
-        Log.i(TAG, "resolve took ${System.currentTimeMillis() - t0} ms; tool=${tools.resolved != null}; audio=${audioWav != null}")
-        tools.resolved to reply.plainText()
+        Log.i(TAG, "resolve took ${System.currentTimeMillis() - t0} ms; tool=${tools.resolved != null}; audio=${audioWav != null}; potion=${tools.potionRequested}; item=${tools.itemUsed}")
+        tools.resolved?.copy(drankPotion = tools.potionRequested, usedItem = tools.itemUsed) to reply.plainText()
     }
 
     /** Nearby signal names -> lore via write_omens. Uses a throwaway conversation so it doesn't pollute a battle. */

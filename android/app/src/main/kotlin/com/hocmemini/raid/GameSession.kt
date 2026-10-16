@@ -246,7 +246,7 @@ class GameSession(private val app: Application) {
             if (mine && f.parried) n = n.copy(parries = n.parries + 1)
             if (mine && f.label == "LEGENDARY!") n = n.copy(legendaryHits = n.legendaryHits + 1)
             if (mine && f.label == "stylish") n = n.copy(stylishHits = n.stylishHits + 1)
-            if (mine && f.label.startsWith("🧪")) n = n.copy(potions = n.potions + 1)
+            if (mine && (f.label.startsWith("🧪") || f.potion > 0)) n = n.copy(potions = n.potions + 1)
             if (f.killed) n = n.copy(kills = n.kills + 1, bosses = n.bosses + (if (s.monster?.name?.startsWith("👑") == true) 1 else 0), longestFightTurns = maxOf(n.longestFightTurns, s.turn))
             if (f.label == "spawn") n = n.copy(encounters = n.encounters + 1)
             n
@@ -417,7 +417,7 @@ class GameSession(private val app: Application) {
         val shown = text ?: "🎤 (${(audioWav!!.size - 44) / 32000}s of shouting)"
         state.update { it.copy(busy = true, players = it.players + (p.id to p)).withLog("${p.name}: $shown") }; broadcast()
         val t0 = System.currentTimeMillis()
-        val (r, reply) = runCatching { g.resolve(p.name, text, audioWav, m.name, m.hp, m.weakness, facing, flanking, p.items) }
+        val (r, reply) = runCatching { g.resolve(p.name, text, audioWav, m.name, m.hp, m.weakness, facing, flanking, p.items, p.potions) }
             .getOrElse { state.update { s -> s.copy(busy = false).withLog("Gemma error: ${it.message}") }; broadcast(); return }
         statsStore.update { it.copy(resolves = it.resolves + 1, resolveMs = it.resolveMs + (System.currentTimeMillis() - t0), audioResolves = it.audioResolves + (if (audioWav != null) 1 else 0), toolRetries = g.retries) }
         if (r == null) {
@@ -430,6 +430,10 @@ class GameSession(private val app: Application) {
         if (dmg > 0) dmg += cry
         val crit = r.style >= 4
         if (r.style >= 5) dmg *= 2 else if (r.style == 4) dmg = (dmg * 1.5f).roundToInt()
+        // Voice/typed item use: Gemma called use_item with a name; match it against what the player carries.
+        val itemUsed = r.usedItem?.let { want -> p.items.firstOrNull { it.equals(want, true) || it.contains(want, true) || want.contains(it, true) } }
+        if (itemUsed != null && dmg > 0) dmg = (dmg * 1.5f).roundToInt()
+        val wantsPotion = r.drankPotion && p.potions > 0
         val parried = playerId in s0.parries
         val aliveCount = s0.players.values.count { it.hp > 0 }
         // Solo mercy: a lone player takes 60% of the monster's damage.
@@ -445,6 +449,7 @@ class GameSession(private val app: Application) {
             if (flanking) append(" (flank!)")
             if (!facing) append(" (not facing it)")
             if (cry > 0) append(" (battle cry +$cry)")
+            if (itemUsed != null) append(" (🎁 $itemUsed ×1.5)")
             if (parried && r.damageToPlayer > 0) append(", 🛡 parried ${r.damageToPlayer}")
             else if (hurt > 0) append(", −$hurt ${p.name}")
             if (xpGain > 0) append(", +$xpGain xp")
@@ -453,15 +458,19 @@ class GameSession(private val app: Application) {
         var wind = false
         state.update { s ->
             val cur = s.players[p.id] ?: p   // re-read: a potion may have landed while Gemma was thinking
-            var hpNow = (cur.hp - hurt).coerceAtLeast(0)
-            var me = cur.copy(hp = hpNow, xp = cur.xp + xpGain, headingDeg = headingDeg, lat = lat, lon = lon)
+            val healed = if (wantsPotion && cur.potions > 0) min(POTION_HEAL, cur.maxHp - cur.hp) else 0
+            var hpNow = (cur.hp + healed - hurt).coerceAtLeast(0)
+            var me = cur.copy(hp = hpNow, xp = cur.xp + xpGain, headingDeg = headingDeg, lat = lat, lon = lon, potions = if (healed > 0 || (wantsPotion && cur.potions > 0)) cur.potions - 1 else cur.potions)
             if (hpNow == 0 && me.secondWind && !killed) { wind = true; me = me.copy(hp = SECOND_WIND_HP, secondWind = false) }
             val newLevel = levelFor(me.xp)
             var next = s.copy(
                 busy = false, turn = s.turn + 1, monster = m.copy(hp = newMonsterHp), parries = s.parries - playerId,
                 fx = Fx(nextSeq(s), playerId, dealt = dmg, taken = hurt, crit = crit, parried = parried && r.damageToPlayer > 0, killed = killed,
-                    label = if (r.style >= 5) "LEGENDARY!" else if (r.style == 4) "stylish" else "", taunt = if (killed) "" else r.taunt),
+                    label = if (r.style >= 5) "LEGENDARY!" else if (r.style == 4) "stylish" else "", taunt = if (killed) "" else r.taunt,
+                    potion = healed, item = itemUsed ?: ""),
             ).withLog(r.narration).withLog(tag)
+            if (healed > 0) next = next.withLog("🧪 ${me.name} drinks a potion: +$healed HP (${me.potions} left)")
+            else if (r.drankPotion && cur.potions <= 0) next = next.withLog("🧪 ${me.name} reaches for a potion — the bag is empty")
             if (wind) next = next.withLog("💫 ${me.name} refuses to fall — second wind! Back up with ${SECOND_WIND_HP} HP.")
             if (newLevel > me.level) {
                 me = me.copy(level = newLevel, maxHp = maxHpFor(newLevel), hp = maxHpFor(newLevel))

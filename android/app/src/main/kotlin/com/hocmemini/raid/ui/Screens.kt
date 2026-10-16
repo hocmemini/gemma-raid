@@ -448,7 +448,7 @@ private fun FxLayer(fx: Fx?, selfId: String) {
             launch { slashX.snapTo(-1.2f); slashX.animateTo(1.2f, tween(380, easing = LinearEasing)); slashX.snapTo(-2f) }
             launch { numA.snapTo(1f); numY.snapTo(0f); numY.animateTo(-300f, tween(950)); numA.animateTo(0f, tween(250)) }
         }
-        if (f.parried || f.killed || f.label.isNotBlank() && f.label != "spawn") {
+        if (f.parried || f.killed || f.potion > 0 || f.item.isNotBlank() || f.label.isNotBlank() && f.label != "spawn") {
             launch { banner.snapTo(1f); kotlinx.coroutines.delay(1300); banner.animateTo(0f, tween(450)) }
         }
         if (f.taken > 0 && f.playerId == selfId) {
@@ -457,15 +457,15 @@ private fun FxLayer(fx: Fx?, selfId: String) {
         }
     }
 
-    val bannerText = when {
-        fx == null -> ""
-        fx.killed -> "💥 SLAIN"
-        fx.parried -> "🛡 PARRIED"
-        fx.label == "LEGENDARY!" -> "★ LEGENDARY ★"
-        fx.label == "stylish" -> "★ stylish"
-        fx.label.startsWith("🧪") -> fx.label
-        else -> ""
-    }
+    val bannerText = if (fx == null) "" else buildList {
+        if (fx.killed) add("💥 SLAIN")
+        if (fx.parried) add("🛡 PARRIED")
+        if (fx.label == "LEGENDARY!") add("★ LEGENDARY ★")
+        if (fx.label == "stylish") add("★ stylish")
+        if (fx.label.startsWith("🧪")) add(fx.label)
+        if (fx.potion > 0) add("🧪 +${fx.potion}")
+        if (fx.item.isNotBlank()) add("🎁 ${fx.item}")
+    }.joinToString("\n")
 
     Box(Modifier.fillMaxSize()) {
         if (red.value > 0f) Box(Modifier.fillMaxSize().background(Color.Red.copy(alpha = red.value)))
@@ -482,7 +482,7 @@ private fun FxLayer(fx: Fx?, selfId: String) {
         }
         if (banner.value > 0f && bannerText.isNotBlank()) {
             Text(
-                bannerText, color = Color(0xFFFFD54F), fontSize = 40.sp, fontWeight = FontWeight.Black,
+                bannerText, color = Color(0xFFFFD54F), fontSize = 34.sp, fontWeight = FontWeight.Black, textAlign = TextAlign.Center,
                 modifier = Modifier.align(Alignment.TopCenter).padding(top = 170.dp)
                     .graphicsLayer { alpha = banner.value; scaleX = 0.7f + 0.3f * banner.value; scaleY = 0.7f + 0.3f * banner.value }
                     .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(12.dp)).padding(horizontal = 16.dp, vertical = 6.dp),

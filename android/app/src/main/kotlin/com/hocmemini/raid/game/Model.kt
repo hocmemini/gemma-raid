@@ -53,6 +53,8 @@ data class Fx(
     val label: String = "",
     /** What the monster shouts, shown in a speech bubble. */
     val taunt: String = "",
+    val potion: Int = 0,
+    val item: String = "",
 )
 
 /** A nearby Wi-Fi/Bluetooth signal that Gemma turned into lore. */
