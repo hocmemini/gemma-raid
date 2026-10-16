@@ -25,7 +25,7 @@ data class Loot(val name: String, val effect: String)
 data class OmenText(val name: String, val lore: String, val threat: Int)
 data class SpawnedNpc(val name: String, val role: String, val emoji: String, val accessories: List<String>, val greeting: String, val offer: String)
 data class Strike(val damageToPlayer: Int, val narration: String, val taunt: String)
-data class Trade(val item: String, val effect: String, val priceXp: Int)
+data class Trade(val item: String, val effect: String, val priceXp: Int, val discount: Int = 0)
 
 /**
  * The tools Gemma 4 calls. LiteRT-LM runs them automatically mid-generation; they just stash
@@ -83,12 +83,19 @@ class GameTools : ToolSet {
         strike = Strike(damageToPlayer.coerceIn(1, 12), narration, taunt.take(60)); return mapOf("ok" to true)
     }
 
-    @Tool(description = "An NPC merchant offers to sell the player an item for XP. Call when the player wants to buy or asks what is for sale.")
+    @Tool(description = "An NPC merchant offers to sell the player an item for XP. Call when the player wants to buy or asks what is for sale. The price in this call is the real price; quote exactly it in your words.")
     fun sell_item(
         @ToolParam(description = "Item name") name: String,
         @ToolParam(description = "One short sentence: what it does in a fight") effect: String,
-        @ToolParam(description = "Price in XP, 20 to 150") priceXp: Int,
-    ): Map<String, Any> { trade = Trade(name.take(40), effect.take(120), priceXp.coerceIn(10, 300)); return mapOf("ok" to true) }
+        @ToolParam(description = "Base price in XP, 20 to 150") priceXp: Int,
+        @ToolParam(description = "Haggling: 0 to 50 percent off, earned by charm, wit or credible intimidation; 0 if the player was rude or boring") discountPercent: Int,
+    ): Map<String, Any> {
+        val d = discountPercent.coerceIn(0, 50)
+        val final = (priceXp.coerceIn(10, 300) * (100 - d) / 100).coerceAtLeast(5)
+        trade = Trade(name.take(40), effect.take(120), final, d)
+        Log.i("Gemma", "sell_item $name base=$priceXp discount=$d% -> $final")
+        return mapOf("ok" to true, "finalPriceXp" to final)
+    }
 
     @Tool(description = "An NPC gives the player an item for free. Call at most once per character, when the player earns or charms it out of them.")
     fun give_item(
@@ -312,7 +319,7 @@ class Gemma(private val modelPath: String, private val useGpu: Boolean) {
         tools.trade = null; tools.gift = null; tools.heal = 0
         val situation = buildString {
             append("You are now $npcName, the $role. Stay in character, under 40 words. $playerName has $xp XP and carries: ${items.ifEmpty { listOf("nothing") }.joinToString(", ")}. ")
-            append("Use sell_item for purchases (only if they can afford it), give_item for a gift, heal_player to heal. ")
+            append("Use sell_item when they ask to buy or what's for sale — the tool's price is the real price, so say that exact number; a good haggle earns discountPercent. give_item for a free gift at most once, heal_player to heal. ")
             if (audioWav != null) append("$playerName speaks in the attached audio.") else append("$playerName says: \"$text\"")
         }
         val reply = if (audioWav != null) send(Contents.of(Content.AudioBytes(audioWav), Content.Text(situation))) else send(Contents.of(situation))
@@ -421,7 +428,7 @@ object LenientTools {
             "spawn_npc" -> { t.spawn_npc(str("name").ifBlank { "A Stranger" }, str("role").ifBlank { "oddball" }, str("emoji").ifBlank { "🙂" }, str("accessories").replace("\"", " "), str("greeting"), str("offer")); true }
             "drop_loot" -> { t.drop_loot(str("name").ifBlank { "a curious trinket" }, str("effect")); true }
             "monster_strike" -> { t.monster_strike(int("damageToPlayer", 3), str("narration"), str("taunt")); true }
-            "sell_item" -> { t.sell_item(str("name"), str("effect"), int("priceXp", 50)); true }
+            "sell_item" -> { t.sell_item(str("name"), str("effect"), int("priceXp", 50), int("discountPercent", 0)); true }
             "give_item" -> { t.give_item(str("name"), str("effect")); true }
             "heal_player" -> { t.heal_player(int("amount", 10)); true }
             "use_power" -> { t.use_power(str("power"), str("argument")); true }

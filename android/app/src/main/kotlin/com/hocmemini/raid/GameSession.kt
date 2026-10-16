@@ -565,8 +565,9 @@ class GameSession(private val app: Application) {
             var next = s.copy(busy = false)
             var spent = 0; var item = ""; var healed = 0
             if (trade != null) {
-                if (me.xp >= trade.priceXp) { me = me.copy(xp = me.xp - trade.priceXp, items = (me.items + Item(trade.item, trade.effect)).takeLast(BAG_SLOTS)); spent = trade.priceXp; item = trade.item; next = next.withLog("💰 ${me.name} buys ${trade.item} for ${trade.priceXp} XP: ${trade.effect}") }
-                else next = next.withLog("💰 ${trade.item} costs ${trade.priceXp} XP — ${me.name} has ${me.xp}.")
+                val tag = if (trade.discount > 0) " (${trade.discount}% off — well haggled)" else ""
+                if (me.xp >= trade.priceXp) { me = me.copy(xp = me.xp - trade.priceXp, items = (me.items + Item(trade.item, trade.effect)).takeLast(BAG_SLOTS)); spent = trade.priceXp; item = trade.item; next = next.withLog("💰 ${me.name} buys ${trade.item} for ${trade.priceXp} XP$tag: ${trade.effect}") }
+                else next = next.withLog("💰 ${trade.item}: ${trade.priceXp} XP$tag — ${me.name} has ${me.xp}. Go earn it.")
             }
             if (gift != null) { me = me.copy(items = (me.items + Item(gift.item, gift.effect)).takeLast(BAG_SLOTS)); item = gift.item; next = next.withLog("🎁 ${npc.name} gives ${me.name} ${gift.item}: ${gift.effect}") }
             if (heal > 0 && me.hp < me.maxHp) { healed = min(heal, me.maxHp - me.hp); me = me.copy(hp = me.hp + healed); next = next.withLog("💚 ${npc.name} heals ${me.name}: +$healed HP") }
