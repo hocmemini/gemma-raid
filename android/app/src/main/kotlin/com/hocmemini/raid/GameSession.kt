@@ -293,7 +293,7 @@ class GameSession(private val app: Application) {
         statsStore.update { it.copy(raids = it.raids + 1) }
         link = NearbyLink(
             app, selfName, ::onMessage, ::onBinary,
-            onPeersChanged = { ps -> peers.value = ps; if (ps.isNotEmpty()) { link?.send(Msg.Join(selfPlayer())); sfx.play("join") } },
+            onPeersChanged = { ps -> val wasEmpty = peers.value.isEmpty(); peers.value = ps; if (ps.isNotEmpty() && wasEmpty) { link?.send(Msg.Join(selfPlayer())); sfx.play("join") } },
             onStatus = { status.value = it },
         ).also { it.join() }
     }
@@ -330,6 +330,10 @@ class GameSession(private val app: Application) {
         )
     }
 
+    val connected: Boolean get() = link?.connected == true
+    fun radioProblems(): String? = NearbyLink(app, "probe", { _, _ -> }, { _, _ -> }, {}, {}).radioProblems()
+    fun rejoin() { if (role.value == Role.CLIENT) { status.value = "searching again…"; link?.rejoin() } }
+
     fun sendPose() {
         if (role.value != Role.CLIENT) return
         val loc = locator.location.value
@@ -339,7 +343,13 @@ class GameSession(private val app: Application) {
     private fun onMessage(endpointId: String, msg: Msg) {
         when (msg) {
             is Msg.Join -> if (role.value == Role.HOST) {
-                state.update { it.copy(players = it.players + (msg.player.id to msg.player)).withLog("${msg.player.name} joined the raid") }
+                val existing = state.value.players[msg.player.id]
+                if (existing != null) {
+                    // a reconnect, not a new player: keep their hp/xp/items
+                    state.update { it.copy(players = it.players + (existing.id to existing.copy(name = msg.player.name, headingDeg = msg.player.headingDeg, lat = msg.player.lat, lon = msg.player.lon))).withLog("${existing.name} reconnected") }
+                } else {
+                    state.update { it.copy(players = it.players + (msg.player.id to msg.player)).withLog("${msg.player.name} joined the raid") }
+                }
                 sfx.play("join"); broadcast()
                 state.value.monster?.sprite?.takeIf { it.isNotBlank() }?.let { sendSprite(it, listOf(endpointId)) }
             }
@@ -382,7 +392,9 @@ class GameSession(private val app: Application) {
         scope.launch { submit(h.playerId, null, bytes, h.headingDeg, h.lat, h.lon) }
     }
 
-    private fun broadcast() { trackFx(state.value); absorbLog(state.value); state.value.players[selfId]?.let { saveCharacter(it) }; link?.send(Msg.State(state.value)) }
+    /** What goes over the air: the last 14 log lines and at most 6 omens keep the payload well under Nearby's 32 KB. */
+    private fun wireState(s: GameState): GameState = s.copy(log = s.log.takeLast(14), omens = s.omens.take(6))
+    private fun broadcast() { trackFx(state.value); absorbLog(state.value); state.value.players[selfId]?.let { saveCharacter(it) }; link?.send(Msg.State(wireState(state.value))) }
 
     private fun onPhaseChanged(phase: Phase) {
         when (phase) {

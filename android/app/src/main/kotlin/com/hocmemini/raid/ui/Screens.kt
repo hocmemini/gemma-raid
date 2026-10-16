@@ -155,6 +155,14 @@ fun LobbyScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit, onM
             }
         }
 
+        val radio = vm.radioProblems()
+        if (radio != null) {
+            val ctx = LocalContext.current
+            Card { Row(Modifier.padding(12.dp).fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text("📡 Multiplayer: $radio", color = Dungeon.ember, modifier = Modifier.weight(1f))
+                TextButton({ runCatching { ctx.startActivity(android.content.Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS)) } }) { Text("Settings") }
+            } }
+        }
         Button({ vm.host(name) }, enabled = name.isNotBlank() && gemmaReady, modifier = Modifier.fillMaxWidth()) {
             Text(if (gemmaReady) "Host (this phone is the dungeon master)" else "Host (waiting for Gemma…)")
         }
@@ -309,6 +317,22 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit, onMo
                 }
                 if (chips.isNotEmpty()) Text(chips.joinToString(" · "), color = Color.White.copy(alpha = 0.9f), fontSize = 12.sp,
                     modifier = Modifier.background(Color.Black.copy(alpha = 0.4f), RoundedCornerShape(6.dp)).padding(4.dp))
+            }
+        }
+
+        // client with no host: say so loudly, with retry and leave
+        if (role == GameSession.Role.CLIENT) {
+            val peersNow by vm.peers.collectAsState()
+            if (peersNow.isEmpty()) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.55f)), contentAlignment = Alignment.Center) {
+                Card(Modifier.padding(32.dp)) { Column(Modifier.padding(18.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(if (state.players.isEmpty()) "📡 Looking for a host…" else "📡 Lost the host", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    Text(status.ifBlank { "Both phones need Bluetooth, Wi-Fi and Location on. The host taps Host first." }, fontSize = 13.sp, textAlign = TextAlign.Center)
+                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button({ vm.rejoin() }) { Text("Search again") }
+                        OutlinedButton({ vm.leave() }) { Text("Leave") }
+                    }
+                } }
             }
         }
 

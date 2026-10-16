@@ -47,6 +47,13 @@ Or download the `.litertlm` in Chrome on the phone and use **Pick file** in the 
 
 Tested on Pixel 8 Pro (Android 17). Any Android 12+ phone with Bluetooth can join as a player; only the host needs 6 GB+ RAM.
 
+## Multiplayer checklist (Nearby Connections, no internet)
+Both phones: Bluetooth **on**, Wi-Fi **on** (no network needed), Location **on**, same build installed, all permissions granted.
+Host taps **Host** first (the lobby warns if a radio is off); players tap **Join a nearby host** within ~30 s and see a
+"Looking for a host" card until connected, with Search again / Leave. Only the host needs the model. Sprites and spoken
+actions stream between phones; state payloads are trimmed and gzipped to stay under Nearby's 32 KB limit; a player who
+reconnects keeps their HP, XP and items. Logs: tag `NearbyLink`.
+
 ## Play
 
 1. Host taps **Host**; friends tap **Join a nearby host** (Bluetooth on, no internet needed).
