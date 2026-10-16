@@ -87,6 +87,8 @@ class Gemma(private val modelPath: String, private val useGpu: Boolean) {
     private var conversation: Conversation? = null
     private var turns = 0
     val tools = GameTools()
+    /** Incremented whenever a tool call had to be re-prompted. */
+    @Volatile var retries = 0
 
     suspend fun load(onStatus: (String) -> Unit) = withContext(Dispatchers.IO) {
         Engine.setNativeMinLogSeverity(LogSeverity.ERROR)
@@ -151,7 +153,7 @@ class Gemma(private val modelPath: String, private val useGpu: Boolean) {
         val t0 = System.currentTimeMillis()
         var reply = send(Contents.of(Content.ImageFile(imagePath), Content.Text(prompt)))
         if (tools.spawned == null) {
-            Log.w(TAG, "no spawn_monster call; retrying once")
+            Log.w(TAG, "no spawn_monster call; retrying once"); retries++
             reply = send(Contents.of("You must call the spawn_monster tool for the object in the photo now, then say one short line."))
         }
         Log.i(TAG, "spawn took ${System.currentTimeMillis() - t0} ms; tool=${tools.spawned != null}")
@@ -190,7 +192,7 @@ class Gemma(private val modelPath: String, private val useGpu: Boolean) {
         var reply = if (audioWav != null) send(Contents.of(Content.AudioBytes(audioWav), Content.Text(situation)))
                     else send(Contents.of(situation))
         if (tools.resolved == null) {
-            Log.w(TAG, "no resolve_action call; retrying once")
+            Log.w(TAG, "no resolve_action call; retrying once"); retries++
             reply = send(Contents.of("You must call the resolve_action tool for that action now, then reply in one sentence."))
         }
         Log.i(TAG, "resolve took ${System.currentTimeMillis() - t0} ms; tool=${tools.resolved != null}; audio=${audioWav != null}")

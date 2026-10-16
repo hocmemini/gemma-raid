@@ -1,6 +1,10 @@
 package com.hocmemini.raid.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.ImageCapture
 import androidx.compose.animation.core.Animatable
@@ -69,11 +73,16 @@ import kotlin.math.abs
 @Composable
 fun RaidApp(vm: GameSession) {
     val role by vm.role.collectAsState()
-    if (role == GameSession.Role.NONE) LobbyScreen(vm) else PlayScreen(vm)
+    var showStats by remember { mutableStateOf(false) }
+    if (showStats) {
+        BackHandler { showStats = false }
+        StatsScreen(vm) { showStats = false }
+    } else if (role == GameSession.Role.NONE) LobbyScreen(vm) { showStats = true }
+    else PlayScreen(vm) { showStats = true }
 }
 
 @Composable
-fun LobbyScreen(vm: GameSession) {
+fun LobbyScreen(vm: GameSession, onStats: () -> Unit) {
     var name by remember { mutableStateOf(vm.savedName) }
     val modelPresent by vm.modelPresent.collectAsState()
     val gemmaStatus by vm.gemmaStatus.collectAsState()
@@ -113,12 +122,13 @@ fun LobbyScreen(vm: GameSession) {
         OutlinedButton({ vm.join(name) }, enabled = name.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
             Text("Join a nearby host")
         }
+        TextButton(onStats, modifier = Modifier.fillMaxWidth()) { Text("📊 Stats") }
         Text(status, style = MaterialTheme.typography.bodySmall)
     }
 }
 
 @Composable
-fun PlayScreen(vm: GameSession) {
+fun PlayScreen(vm: GameSession, onStats: () -> Unit) {
     val state by vm.state.collectAsState()
     val role by vm.role.collectAsState()
     val status by vm.status.collectAsState()
@@ -128,6 +138,19 @@ fun PlayScreen(vm: GameSession) {
     val envNow by vm.env.summary.collectAsState()
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
     var action by remember { mutableStateOf("") }
+    var menuOpen by remember { mutableStateOf(false) }
+    var confirmLeave by remember { mutableStateOf(false) }
+
+    BackHandler { confirmLeave = true }
+    if (confirmLeave) {
+        AlertDialog(
+            onDismissRequest = { confirmLeave = false },
+            title = { Text("Leave the raid?") },
+            text = { Text(if (role == GameSession.Role.HOST) "Your party will be disconnected. Gemma stays loaded." else "You'll drop out of the host's party.") },
+            confirmButton = { Button({ confirmLeave = false; vm.leave() }) { Text("Leave") } },
+            dismissButton = { TextButton({ confirmLeave = false }) { Text("Stay") } },
+        )
+    }
 
     DisposableEffect(Unit) { vm.startSensors(); onDispose { vm.stopSensors() } }
     if (role == GameSession.Role.CLIENT) {
@@ -174,6 +197,16 @@ fun PlayScreen(vm: GameSession) {
                 color = Color.White.copy(alpha = 0.85f), fontSize = 12.sp,
                 modifier = Modifier.background(Color.Black.copy(alpha = 0.4f), RoundedCornerShape(6.dp)).padding(4.dp),
             )
+        }
+
+        // top-right menu
+        Box(Modifier.align(Alignment.TopEnd).safeDrawingPadding().padding(12.dp)) {
+            OutlinedButton({ menuOpen = true }) { Text("☰") }
+            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                DropdownMenuItem(text = { Text("📊 Stats") }, onClick = { menuOpen = false; onStats() })
+                if (isHost && state.phase == Phase.BATTLE) DropdownMenuItem(text = { Text("🏳 Abandon fight, regroup") }, onClick = { menuOpen = false; vm.nextEncounter() })
+                DropdownMenuItem(text = { Text("🚪 Leave raid") }, onClick = { menuOpen = false; confirmLeave = true })
+            }
         }
 
         // bottom: log + controls

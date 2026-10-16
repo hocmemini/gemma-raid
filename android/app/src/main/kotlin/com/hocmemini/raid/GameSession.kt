@@ -14,6 +14,8 @@ import com.hocmemini.raid.game.Monster
 import com.hocmemini.raid.game.Msg
 import com.hocmemini.raid.game.Phase
 import com.hocmemini.raid.game.Player
+import com.hocmemini.raid.game.Encounter
+import com.hocmemini.raid.game.StatsStore
 import com.hocmemini.raid.game.headingDelta
 import com.hocmemini.raid.game.levelFor
 import com.hocmemini.raid.game.maxHpFor
@@ -80,6 +82,11 @@ class GameSession(private val app: Application) {
     private var gemma: Gemma? = null
     private val recorder = Recorder()
     private val scanner = SignalScanner(app)
+    val statsStore = StatsStore(app)
+    private var raidStartedAt = 0L
+    private var fightStartedAt = 0L
+    private var lastFxSeq = 0
+    private var lastStepsSeen = 0
     private val vibrator = runCatching { app.getSystemService(VibratorManager::class.java)?.defaultVibrator }.getOrNull()
     /** Host: audio headers waiting for their STREAM payload, by endpoint. */
     private val pendingAudio = mutableMapOf<String, Msg.AudioHeader>()
@@ -135,7 +142,9 @@ class GameSession(private val app: Application) {
         prefs.edit().putString("name", selfName).apply()
         role.value = Role.HOST
         link = NearbyLink(app, selfName, ::onMessage, ::onBinary, { peers.value = it }, { status.value = it }).also { it.host() }
-        steps.reset(); env.markBaseline()
+        steps.reset(); env.markBaseline(); lastStepsSeen = 0
+        raidStartedAt = System.currentTimeMillis()
+        statsStore.update { it.copy(raids = it.raids + 1) }
         state.update { it.copy(phase = Phase.EXPLORE, players = it.players + (selfId to selfPlayer())).withLog("$selfName opened the raid. Walk around, then point at something.") }
         broadcast()
     }
@@ -145,6 +154,7 @@ class GameSession(private val app: Application) {
         val s = state.value
         if (s.phase != Phase.BATTLE || s.busy || (s.players[selfId]?.hp ?: 0) <= 0) return
         lastSwing.value = peak
+        statsStore.update { it.copy(swings = it.swings + 1) }
         buzz(30)
         val text = when {
             peak > 30f -> "I swing with everything I have, a wild all-out strike!"
@@ -193,11 +203,62 @@ class GameSession(private val app: Application) {
         selfName = name.ifBlank { "Player" }
         prefs.edit().putString("name", selfName).apply()
         role.value = Role.CLIENT
+        raidStartedAt = System.currentTimeMillis()
+        statsStore.update { it.copy(raids = it.raids + 1) }
         link = NearbyLink(
             app, selfName, ::onMessage, ::onBinary,
             onPeersChanged = { ps -> peers.value = ps; if (ps.isNotEmpty()) link?.send(Msg.Join(selfPlayer())) },
             onStatus = { status.value = it },
         ).also { it.join() }
+    }
+
+    /** Back to the lobby. Keeps the model loaded; drops the party and the battle. */
+    fun leave() {
+        if (role.value == Role.NONE) return
+        flushPlaytime()
+        if (recording.value) recorder.stop()
+        recording.value = false
+        runCatching { link?.stop() }; link = null
+        peers.value = emptyList(); pendingAudio.clear()
+        role.value = Role.NONE
+        status.value = ""
+        state.value = GameState()
+    }
+
+    private fun flushPlaytime() {
+        if (raidStartedAt > 0) {
+            val secs = ((System.currentTimeMillis() - raidStartedAt) / 1000).toInt()
+            statsStore.update { it.copy(playSeconds = it.playSeconds + secs) }
+            raidStartedAt = 0
+        }
+    }
+
+    /** Both roles: derive stats from the synced Fx event stream so host and clients agree. */
+    private fun trackFx(s: GameState) {
+        val f = s.fx ?: return
+        if (f.seq == lastFxSeq) return
+        lastFxSeq = f.seq
+        val mine = f.playerId == selfId
+        statsStore.update { st ->
+            var n = st
+            if (mine && f.dealt > 0) n = n.copy(damageDealt = n.damageDealt + f.dealt, bestHit = maxOf(n.bestHit, f.dealt))
+            if (mine && f.taken > 0) n = n.copy(damageTaken = n.damageTaken + f.taken)
+            if (mine && f.parried) n = n.copy(parries = n.parries + 1)
+            if (mine && f.label == "LEGENDARY!") n = n.copy(legendaryHits = n.legendaryHits + 1)
+            if (mine && f.label == "stylish") n = n.copy(stylishHits = n.stylishHits + 1)
+            if (mine && f.label.startsWith("🧪")) n = n.copy(potions = n.potions + 1)
+            if (f.killed) n = n.copy(kills = n.kills + 1, bosses = n.bosses + (if (s.monster?.name?.startsWith("👑") == true) 1 else 0), longestFightTurns = maxOf(n.longestFightTurns, s.turn))
+            if (f.label == "spawn") n = n.copy(encounters = n.encounters + 1)
+            n
+        }
+    }
+
+    private fun recordEncounter(s: GameState, outcome: String, loot: String = "") {
+        val m = s.monster ?: return
+        val secs = if (fightStartedAt > 0) ((System.currentTimeMillis() - fightStartedAt) / 1000).toInt() else 0
+        statsStore.update { st ->
+            st.copy(history = (st.history + Encounter(m.emoji, m.name, m.maxHp, outcome, s.turn, secs, loot, m.name.startsWith("👑"))).takeLast(30))
+        }
     }
 
     private fun selfPlayer(): Player {
@@ -232,6 +293,7 @@ class GameSession(private val app: Application) {
             is Msg.State -> if (role.value == Role.CLIENT) {
                 val before = state.value.players[selfId]?.hp
                 state.value = msg.state
+                trackFx(msg.state)
                 val after = msg.state.players[selfId]?.hp
                 if (before != null && after != null && after < before) buzz(120)
                 if (msg.state.phase == Phase.VICTORY && state.value.phase != Phase.VICTORY) buzz(40, 60, 40, 60, 200)
@@ -246,7 +308,7 @@ class GameSession(private val app: Application) {
         scope.launch { resolve(h.playerId, null, bytes, h.headingDeg, h.lat, h.lon) }
     }
 
-    private fun broadcast() { link?.send(Msg.State(state.value)) }
+    private fun broadcast() { trackFx(state.value); link?.send(Msg.State(state.value)) }
 
     // ---------- game loop (host only) ----------
 
@@ -261,6 +323,7 @@ class GameSession(private val app: Application) {
         val loc = locator.location.value
         val conditions = env.describe()
         val lair = state.value.bossLair
+        val t0 = System.currentTimeMillis()
         val (spawned, text) = runCatching { g.spawn(path, walked, conditions, lair?.let { "${it.name} (${it.lore})" }) }
             .getOrElse { state.update { s -> s.copy(busy = false).withLog("Gemma error: ${it.message}") }; broadcast(); return@launch }
         if (spawned == null) {
@@ -271,6 +334,8 @@ class GameSession(private val app: Application) {
             val hp = (spawned.hp + bonus) * (if (lair != null) 3 else 2) / 2
             val m = Monster(if (lair != null) "👑 ${spawned.name}" else spawned.name, hp, hp, spawned.attacks, spawned.weakness, spawned.flavor, bearing, loc?.latitude ?: 0.0, loc?.longitude ?: 0.0, spawned.emoji)
             steps.reset()
+            fightStartedAt = System.currentTimeMillis()
+            statsStore.update { it.copy(spawns = it.spawns + 1, spawnMs = it.spawnMs + (System.currentTimeMillis() - t0), stepsWalked = it.stepsWalked + walked, toolRetries = g.retries) }
             state.update {
                 var s = it.copy(phase = Phase.BATTLE, monster = m, busy = false, turn = 0, steps = 0, env = env.summary.value, parries = emptyList(), bossLair = null, fx = Fx(nextSeq(it), label = "spawn"))
                     .withLog("${m.emoji} ${m.name} appears! ${m.flavor}")
@@ -299,6 +364,7 @@ class GameSession(private val app: Application) {
             state.update { it.copy(busy = false).withLog("📡 ${signals.size} signals, but the DM can't read them: ${line.take(120)}") }; broadcast(); return@launch
         }
         val omens = signals.zip(texts).map { (sig, t) -> Omen(sig.name, t.name, t.lore, t.threat, sig.dbm) }
+        statsStore.update { it.copy(omensRead = it.omensRead + omens.size) }
         val lair = omens.filter { it.threat >= 4 }.maxByOrNull { it.dbm }
         state.update { s ->
             var next = s.copy(busy = false, omens = omens, bossLair = lair)
@@ -312,6 +378,7 @@ class GameSession(private val app: Application) {
     }
 
     fun act(text: String) {
+        statsStore.update { it.copy(typedActions = it.typedActions + 1) }
         val loc = locator.location.value
         val h = compass.heading.value
         if (role.value == Role.HOST) scope.launch { resolve(selfId, text, null, h, loc?.latitude ?: 0.0, loc?.longitude ?: 0.0) }
@@ -327,6 +394,8 @@ class GameSession(private val app: Application) {
         if (!recording.value) return
         recording.value = false
         val wav = recorder.stop() ?: run { status.value = "too short — hold the button while you speak"; return }
+        val loud = (wavLoudness(wav) * 100).roundToInt()
+        statsStore.update { it.copy(shouts = it.shouts + 1, loudestShout = maxOf(it.loudestShout, loud)) }
         val loc = locator.location.value
         val h = compass.heading.value
         val lat = loc?.latitude ?: 0.0; val lon = loc?.longitude ?: 0.0
@@ -347,8 +416,10 @@ class GameSession(private val app: Application) {
 
         val shown = text ?: "🎤 (${(audioWav!!.size - 44) / 32000}s of shouting)"
         state.update { it.copy(busy = true, players = it.players + (p.id to p)).withLog("${p.name}: $shown") }; broadcast()
+        val t0 = System.currentTimeMillis()
         val (r, reply) = runCatching { g.resolve(p.name, text, audioWav, m.name, m.hp, m.weakness, facing, flanking, p.items) }
             .getOrElse { state.update { s -> s.copy(busy = false).withLog("Gemma error: ${it.message}") }; broadcast(); return }
+        statsStore.update { it.copy(resolves = it.resolves + 1, resolveMs = it.resolveMs + (System.currentTimeMillis() - t0), audioResolves = it.audioResolves + (if (audioWav != null) 1 else 0), toolRetries = g.retries) }
         if (r == null) {
             state.update { it.copy(busy = false).withLog("The DM mumbles: ${reply.take(200)}") }; broadcast(); return
         }
@@ -403,11 +474,14 @@ class GameSession(private val app: Application) {
             } else if (players.values.all { it.hp <= 0 }) next = next.copy(phase = Phase.DEFEAT).withLog("The party falls. ${m.name} gloats.")
             next.copy(players = players)
         }
-        if (wind && playerId == selfId) buzz(40, 40, 40, 40, 40)
+        if (wind && playerId == selfId) { buzz(40, 40, 40, 40, 40); statsStore.update { it.copy(secondWinds = it.secondWinds + 1) } }
+        val after = state.value
+        if (after.phase == Phase.DEFEAT) { statsStore.update { it.copy(wipes = it.wipes + 1) }; recordEncounter(after, "wiped the party") }
         broadcast()
         if (killed) {
             if (playerId == selfId) buzz(40, 60, 40, 60, 200)
             val (loot, line) = runCatching { g.loot(m.name, p.name) }.getOrElse { null to "" }
+            recordEncounter(state.value, "slain by ${p.name}", loot?.name ?: "")
             state.update { s ->
                 val me = s.players[p.id] ?: return@update s
                 var next = s
@@ -424,6 +498,7 @@ class GameSession(private val app: Application) {
 
     fun nextEncounter() {
         if (role.value != Role.HOST) return
+        if (state.value.phase == Phase.BATTLE) recordEncounter(state.value, "fled")
         steps.reset()
         state.update { s -> s.copy(phase = Phase.EXPLORE, monster = null, steps = 0, fx = null, players = s.players.mapValues { (_, p) -> p.copy(hp = maxOf(p.hp, p.maxHp / 2), potions = maxOf(p.potions, 1)) }).withLog("The party regroups. Walk around, then point at something new.") }
         broadcast()
