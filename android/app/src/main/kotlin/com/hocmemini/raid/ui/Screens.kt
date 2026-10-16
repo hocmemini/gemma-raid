@@ -19,6 +19,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.Canvas
@@ -54,6 +55,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
@@ -101,15 +103,17 @@ import kotlin.math.abs
 fun RaidApp(vm: GameSession) {
     val role by vm.role.collectAsState()
     var showStats by remember { mutableStateOf(false) }
-    if (showStats) {
-        BackHandler { showStats = false }
-        StatsScreen(vm) { showStats = false }
-    } else if (role == GameSession.Role.NONE) LobbyScreen(vm) { showStats = true }
-    else PlayScreen(vm) { showStats = true }
+    var showJournal by remember { mutableStateOf(false) }
+    when {
+        showStats -> { BackHandler { showStats = false }; StatsScreen(vm) { showStats = false } }
+        showJournal -> { BackHandler { showJournal = false }; JournalScreen(vm) { showJournal = false } }
+        role == GameSession.Role.NONE -> LobbyScreen(vm, onStats = { showStats = true }, onJournal = { showJournal = true })
+        else -> PlayScreen(vm, onStats = { showStats = true }, onJournal = { showJournal = true })
+    }
 }
 
 @Composable
-fun LobbyScreen(vm: GameSession, onStats: () -> Unit) {
+fun LobbyScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit) {
     var name by remember { mutableStateOf(vm.savedName) }
     val modelPresent by vm.modelPresent.collectAsState()
     val gemmaStatus by vm.gemmaStatus.collectAsState()
@@ -150,13 +154,17 @@ fun LobbyScreen(vm: GameSession, onStats: () -> Unit) {
         OutlinedButton({ vm.join(name) }, enabled = name.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
             Text("Join a nearby host")
         }
-        TextButton(onStats, modifier = Modifier.fillMaxWidth()) { Text("📊 Stats") }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+            TextButton(onStats) { Text("📊 Stats") }
+            TextButton(onJournal) { Text("📖 Journal") }
+        }
         Text(status, style = MaterialTheme.typography.bodySmall)
     }
 }
 
 @Composable
-fun PlayScreen(vm: GameSession, onStats: () -> Unit) {
+fun PlayScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit) {
+    val textScale by vm.textScale.collectAsState()
     val state by vm.state.collectAsState()
     val role by vm.role.collectAsState()
     val status by vm.status.collectAsState()
@@ -258,7 +266,7 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit) {
         Column(Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 state.players.values.forEach { p ->
-                    Column(Modifier.background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(8.dp)).pointerInput(p.id) { detectTapGestures { if (p.id == vm.selfId) showBag = true } }.padding(6.dp)) {
+                    Column(Modifier.background(Dungeon.stone.copy(alpha = 0.7f), RoundedCornerShape(8.dp)).border(1.dp, Dungeon.gold.copy(alpha = if (p.id == vm.selfId) 0.8f else 0.35f), RoundedCornerShape(8.dp)).pointerInput(p.id) { detectTapGestures { if (p.id == vm.selfId) showBag = true } }.padding(6.dp)) {
                         Text(
                             "${p.name}${if (p.epithet.isNotBlank()) " ${p.epithet}" else ""} · L${p.level}",
                             color = if (p.hp > 0) Color.White else Color.Red,
@@ -298,6 +306,8 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit) {
             OutlinedButton({ menuOpen = true }) { Text("☰") }
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                 DropdownMenuItem(text = { Text("🎒 Inventory") }, onClick = { menuOpen = false; showBag = true })
+                DropdownMenuItem(text = { Text("📖 Journal") }, onClick = { menuOpen = false; onJournal() })
+                DropdownMenuItem(text = { Text("Aa Text size (${(textScale * 100).toInt()}%)") }, onClick = { vm.cycleTextScale() })
                 DropdownMenuItem(text = { Text("📊 Stats") }, onClick = { menuOpen = false; onStats() })
                 DropdownMenuItem(text = { Text(if (vm.sfx.muted) "🔈 Unmute" else "🔇 Mute") }, onClick = { vm.sfx.muted = !vm.sfx.muted; menuOpen = false })
                 DropdownMenuItem(text = { Text(if (narrate) "🗣 Stop narrating aloud" else "🗣 Narrate aloud") }, onClick = { vm.narrateAloud.value = !narrate; menuOpen = false })
@@ -310,10 +320,18 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit) {
 
         // bottom: log + controls
         Column(
-            Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Dungeon.stone.copy(alpha = 0.78f)).safeDrawingPadding().padding(12.dp),
+            Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Dungeon.stone.copy(alpha = 0.82f)).safeDrawingPadding().padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            state.log.takeLast(4).forEach { line ->
+            Box(Modifier.fillMaxWidth().height(2.dp).background(Dungeon.gold.copy(alpha = 0.5f)))
+            val logState = rememberScrollState()
+            LaunchedEffect(state.logTotal) { logState.scrollTo(logState.maxValue) }
+            Column(
+                Modifier.fillMaxWidth().heightIn(max = (150 * textScale).dp).verticalScroll(logState)
+                    .pointerInput(Unit) { detectTapGestures(onTap = { onJournal() }) },
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+            state.log.takeLast(12).forEach { line ->
                 val tint = when {
                     line.startsWith("−") || line.contains("LEGENDARY") -> Dungeon.gold
                     line.startsWith("📜") || line.startsWith("🏷") -> Dungeon.parchment
@@ -321,7 +339,8 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit) {
                     line.startsWith("⚡") || line.contains("falls") -> Dungeon.ember
                     else -> Color.White
                 }
-                Text(line, color = tint, fontSize = 14.sp)
+                Text(line, color = tint, fontSize = (14 * textScale).sp)
+            }
             }
             if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
             else if (state.phase == Phase.BATTLE && state.windup > 0) {

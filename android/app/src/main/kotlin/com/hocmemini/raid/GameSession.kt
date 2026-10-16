@@ -78,6 +78,10 @@ class GameSession(private val app: Application) {
     val peers = MutableStateFlow<List<String>>(emptyList())
     val recording = MutableStateFlow(false)
     val debugHud = MutableStateFlow(false)
+    /** Full history of everything the DM, NPCs and players said; survives restarts. */
+    val journal = MutableStateFlow<List<String>>(emptyList())
+    private var seenLogTotal = 0
+    val textScale = MutableStateFlow(1f)
     val narrateAloud = MutableStateFlow(false)
     val savedName: String get() = prefs.getString("name", "") ?: ""
 
@@ -118,6 +122,35 @@ class GameSession(private val app: Application) {
     private fun savedCharacter(): Player? = runCatching { prefs.getString("character", null)?.let { json.decodeFromString(Player.serializer(), it) } }.getOrNull()
     private fun saveCharacter(p: Player) { prefs.edit().putString("character", json.encodeToString(Player.serializer(), p)).apply() }
     fun resetCharacter() { prefs.edit().remove("character").apply() }
+
+    init {
+        textScale.value = prefs.getFloat("textScale", 1f)
+        journal.value = runCatching { prefs.getString("journal", null)?.let { json.decodeFromString(kotlinx.serialization.builtins.ListSerializer(kotlinx.serialization.serializer<String>()), it) } }.getOrNull() ?: emptyList()
+    }
+
+    fun cycleTextScale() {
+        val next = when (textScale.value) { 1f -> 1.2f; 1.2f -> 1.45f; else -> 1f }
+        textScale.value = next; prefs.edit().putFloat("textScale", next).apply()
+    }
+
+    fun clearJournal() { journal.value = emptyList(); prefs.edit().remove("journal").apply() }
+
+    private fun absorbLog(s: GameState) {
+        val fresh = s.logTotal - seenLogTotal
+        if (fresh <= 0) { if (fresh < 0) seenLogTotal = s.logTotal; return }
+        val lines = s.log.takeLast(minOf(fresh, s.log.size))
+        seenLogTotal = s.logTotal
+        val stamp = java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(java.util.Date())
+        val tagged = lines.map { "$stamp  $it" }
+        val next = (journal.value + tagged).takeLast(600)
+        journal.value = next
+        prefs.edit().putString("journal", json.encodeToString(kotlinx.serialization.builtins.ListSerializer(kotlinx.serialization.serializer<String>()), next)).apply()
+    }
+
+    private fun journalMark(title: String) {
+        val stamp = java.text.SimpleDateFormat("HH:mm", java.util.Locale.US).format(java.util.Date())
+        journal.value = (journal.value + "$stamp  ━━ $title ━━").takeLast(600)
+    }
     fun characterSummary(): String? = savedCharacter()?.let { c ->
         "Your character: L${c.level}${if (c.epithet.isNotBlank()) " ${c.epithet}" else ""} · ${c.xp} xp · ${c.items.size} items · ${c.companions.size} companions · powers: ${powersFor(c.level).ifEmpty { listOf("none yet") }.joinToString(", ")}"
     }
@@ -169,6 +202,7 @@ class GameSession(private val app: Application) {
         steps.reset(); env.markBaseline()
         raidStartedAt = System.currentTimeMillis()
         statsStore.update { it.copy(raids = it.raids + 1) }
+        seenLogTotal = 0; journalMark("Raid ${statsStore.stats.value.raids} · ${java.text.SimpleDateFormat("EEE d MMM", java.util.Locale.US).format(java.util.Date())}")
         state.update { it.copy(phase = Phase.EXPLORE, players = it.players + (selfId to selfPlayer())).withLog("$selfName opened the raid. Walk around, then point at something.") }
         broadcast()
         sfx.loop("ambient_explore")
@@ -178,6 +212,7 @@ class GameSession(private val app: Application) {
         selfName = name.ifBlank { "Player" }
         prefs.edit().putString("name", selfName).apply()
         role.value = Role.CLIENT
+        seenLogTotal = 0; journalMark("Joined a raid")
         raidStartedAt = System.currentTimeMillis()
         statsStore.update { it.copy(raids = it.raids + 1) }
         link = NearbyLink(
@@ -243,7 +278,7 @@ class GameSession(private val app: Application) {
             is Msg.State -> if (role.value == Role.CLIENT) {
                 val before = state.value
                 state.value = msg.state
-                trackFx(msg.state)
+                trackFx(msg.state); absorbLog(msg.state)
                 msg.state.players[selfId]?.let { saveCharacter(it) }
                 val hpBefore = before.players[selfId]?.hp; val hpAfter = msg.state.players[selfId]?.hp
                 if (hpBefore != null && hpAfter != null && hpAfter < hpBefore) buzz(120)
@@ -270,7 +305,7 @@ class GameSession(private val app: Application) {
         scope.launch { submit(h.playerId, null, bytes, h.headingDeg, h.lat, h.lon) }
     }
 
-    private fun broadcast() { trackFx(state.value); state.value.players[selfId]?.let { saveCharacter(it) }; link?.send(Msg.State(state.value)) }
+    private fun broadcast() { trackFx(state.value); absorbLog(state.value); state.value.players[selfId]?.let { saveCharacter(it) }; link?.send(Msg.State(state.value)) }
 
     private fun onPhaseChanged(phase: Phase) {
         when (phase) {
@@ -440,6 +475,7 @@ class GameSession(private val app: Application) {
             if (spriteName.isNotBlank()) spriteVersion.value++
             val m = Monster(if (lair != null) "👑 ${spawned.name}" else spawned.name, hp, hp, spawned.attacks, spawned.weakness, spawned.flavor, bearing, loc?.latitude ?: 0.0, loc?.longitude ?: 0.0, loc?.accuracy ?: 999f, spawned.emoji, spawned.accessories, spriteName)
             steps.reset(); fightStartedAt = System.currentTimeMillis()
+            journalMark("${m.emoji} ${m.name}")
             statsStore.update { it.copy(spawns = it.spawns + 1, spawnMs = it.spawnMs + (System.currentTimeMillis() - t0), stepsWalked = it.stepsWalked + walked, toolRetries = g.retries) }
             state.update {
                 var s = it.copy(phase = Phase.BATTLE, monster = m, busy = false, turn = 0, steps = 0, env = env.summary.value, parries = emptyList(), bossLair = null, windup = 0, monsterDazed = false, recastUsed = false, fx = Fx(nextSeq(it), label = "spawn", taunt = spawned.taunt))
@@ -475,6 +511,7 @@ class GameSession(private val app: Application) {
         } else {
             val spriteName = spriteJob.await()?.name ?: ""
             if (spriteName.isNotBlank()) spriteVersion.value++
+            journalMark("${npc.emoji} ${npc.name}")
             val m = Monster(npc.name, 0, 0, emptyList(), "", npc.offer, bearing, loc?.latitude ?: 0.0, loc?.longitude ?: 0.0, loc?.accuracy ?: 999f, npc.emoji, npc.accessories, spriteName, friendly = true, role = npc.role, offer = npc.offer)
             state.update {
                 var s = it.copy(phase = Phase.NPC, monster = m, busy = false, fx = Fx(nextSeq(it), label = "spawn", taunt = npc.greeting))

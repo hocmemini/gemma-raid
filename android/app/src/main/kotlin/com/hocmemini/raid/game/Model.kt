@@ -125,10 +125,12 @@ data class GameState(
     /** Taunt landed: the monster's next strike is halved. */
     val monsterDazed: Boolean = false,
     val recastUsed: Boolean = false,
+    /** Lines ever logged; lets every phone append only new lines to its journal. */
+    val logTotal: Int = 0,
     /** Set when the strongest omen is menacing enough: the next spawn is its boss. */
     val bossLair: Omen? = null,
 ) {
-    fun withLog(line: String): GameState = copy(log = (log + line).takeLast(40))
+    fun withLog(line: String): GameState = copy(log = (log + line).takeLast(40), logTotal = logTotal + 1)
 }
 
 /** Wire messages between phones. Only the host runs Gemma; clients send intents, host broadcasts state. */
