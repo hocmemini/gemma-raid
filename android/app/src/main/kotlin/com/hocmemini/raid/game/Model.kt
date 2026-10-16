@@ -110,6 +110,10 @@ data class Victory(val name: String, val emoji: String, val xp: Int, val by: Str
 @Serializable
 data class Lurker(val name: String, val hp: Int, val attacks: List<String>, val weakness: String, val flavor: String, val emoji: String, val accessories: List<String>, val taunt: String, val sprite: String, val capturedAt: Long)
 
+/** A live objective. kind is matched by game events; arg narrows it (e.g. a weakness word). */
+@Serializable
+data class Quest(val id: String, val title: String, val kind: String, val target: Int, val progress: Int = 0, val arg: String = "", val rewardXp: Int, val done: Boolean = false)
+
 @Serializable
 data class GameState(
     val phase: Phase = Phase.LOBBY,
@@ -139,6 +143,10 @@ data class GameState(
     /** How many pre-generated monsters are following the party (host shares the count). */
     val lurking: Int = 0,
     val ambush: Boolean = false,
+    val quests: List<Quest> = emptyList(),
+    val questsDone: Int = 0,
+    /** Name of this raid's dungeon, written by the DM at the start. */
+    val dungeon: String = "",
     /** Set when the strongest omen is menacing enough: the next spawn is its boss. */
     val bossLair: Omen? = null,
 ) {

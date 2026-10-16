@@ -24,6 +24,7 @@ import com.hocmemini.raid.game.Omen
 import com.hocmemini.raid.game.Phase
 import com.hocmemini.raid.game.Player
 import com.hocmemini.raid.game.Victory
+import com.hocmemini.raid.game.Quest
 import com.hocmemini.raid.game.Lurker
 import com.hocmemini.raid.llm.SpawnedMonster
 import com.hocmemini.raid.game.StatsStore
@@ -279,6 +280,7 @@ class GameSession(private val app: Application) {
         statsStore.update { it.copy(raids = it.raids + 1) }
         seenLogTotal = 0; journalMark("Raid ${statsStore.stats.value.raids} · ${java.text.SimpleDateFormat("EEE d MMM", java.util.Locale.US).format(java.util.Date())}")
         state.update { it.copy(phase = Phase.EXPLORE, players = it.players + (selfId to selfPlayer())).withLog("$selfName opened the raid. Walk around, then point at something.") }
+        seedQuests()
         broadcast()
         sfx.loop("ambient_explore")
         startScout()
@@ -405,6 +407,73 @@ class GameSession(private val app: Application) {
         if (role.value == Role.HOST) { if (phase == Phase.EXPLORE) startScout() else scoutJob?.cancel() }
     }
 
+    // ---------- quests ----------
+
+    private var questSeq = 0
+    private var lastQuestSteps = 0
+
+    private fun questTemplates(level: Int): List<Quest> = buildList {
+        add(Quest("", "Slay 2 monsters", "kill", 2, rewardXp = 40))
+        add(Quest("", "Slay 3 monsters", "kill", 3, rewardXp = 70))
+        add(Quest("", "Land a LEGENDARY blow", "legendary", 1, rewardXp = 50))
+        add(Quest("", "Win a fight using only your voice", "voicekill", 1, rewardXp = 60))
+        add(Quest("", "Buy something from a merchant", "buy", 1, rewardXp = 30))
+        add(Quest("", "Meet 2 strangers", "meet", 2, rewardXp = 35))
+        add(Quest("", "Read the omens", "omens", 1, rewardXp = 20))
+        add(Quest("", "Walk 80 steps between fights", "steps", 80, rewardXp = 30))
+        add(Quest("", "Survive an ambush", "ambush", 1, rewardXp = 60))
+        add(Quest("", "Loot 2 items", "loot", 2, rewardXp = 30))
+        add(Quest("", "Parry a blow", "parry", 1, rewardXp = 25))
+        add(Quest("", "Escape a fight", "escape", 1, rewardXp = 25))
+        if (level >= 2) add(Quest("", "Daze a monster with a Taunt", "taunt", 1, rewardXp = 40))
+        if (level >= 3) add(Quest("", "Talk a monster down (Parley)", "parley", 1, rewardXp = 80))
+        if (level >= 4) add(Quest("", "Bind a companion", "bind", 1, rewardXp = 80))
+        add(Quest("", "Slay a BOSS", "boss", 1, rewardXp = 120))
+    }
+
+    private fun newQuest(existing: List<Quest>, level: Int): Quest {
+        val used = existing.map { it.kind }.toSet()
+        val pool = questTemplates(level).filter { it.kind !in used }.ifEmpty { questTemplates(level) }
+        return pool.random().copy(id = "q${++questSeq}")
+    }
+
+    private fun seedQuests() {
+        val me = state.value.players[selfId]
+        var qs = emptyList<Quest>()
+        repeat(3) { qs = qs + newQuest(qs, me?.level ?: 1) }
+        lastQuestSteps = steps.sinceReset.value
+        state.update { it.copy(quests = qs) }
+    }
+
+    /** Advance every live quest of this kind; complete, reward, replace. Host only. */
+    private fun questEvent(kind: String, amount: Int = 1) {
+        if (role.value != Role.HOST || amount <= 0) return
+        val s0 = state.value
+        if (s0.quests.none { it.kind == kind && !it.done }) return
+        state.update { s ->
+            var next = s
+            var quests = s.quests
+            val completed = mutableListOf<Quest>()
+            quests = quests.map { q -> if (q.kind == kind && !q.done) { val p = (q.progress + amount).coerceAtMost(q.target); val d = p >= q.target; if (d) completed += q; q.copy(progress = p, done = d) } else q }
+            val me = s.players[selfId]
+            completed.forEach { q ->
+                next = next.withLog("📜 Quest complete: ${q.title} (+${q.rewardXp} XP, +1 potion)")
+                if (me != null) next = next.copy(players = next.players + (me.id to (next.players[me.id] ?: me).let { it.copy(xp = it.xp + q.rewardXp, potions = it.potions + 1) }))
+                next = next.copy(fx = Fx(nextSeq(next), selfId, label = "quest", say = q.title))
+                quests = quests.filterNot { it.id == q.id } + newQuest(quests.filterNot { it.id == q.id }, me?.level ?: 1)
+            }
+            next.copy(quests = quests, questsDone = next.questsDone + completed.size)
+        }
+        if (s0.quests.any { it.kind == kind && !it.done && it.progress + amount >= it.target }) { buzz(30, 40, 30, 40, 120); statsStore.update { it.copy(questsDone = it.questsDone + 1) } }
+    }
+
+    private fun questSteps() {
+        val now = steps.sinceReset.value
+        val d = now - lastQuestSteps
+        if (d > 0) { lastQuestSteps = now; questEvent("steps", d) }
+        if (now < lastQuestSteps) lastQuestSteps = now
+    }
+
     // ---------- lurkers: scout while exploring, ambush later ----------
 
     private fun startScout() {
@@ -416,6 +485,7 @@ class GameSession(private val app: Application) {
                 val s = state.value
                 if (s.phase != Phase.EXPLORE || role.value != Role.HOST) break
                 if (s.busy || gemma == null) continue
+                questSteps()
                 val stepsNow = steps.sinceReset.value
                 // spring an ambush once the party has walked far enough since the last fight
                 val lk = lurkers.value
@@ -522,6 +592,7 @@ class GameSession(private val app: Application) {
             "pin" -> sfx.play("ping")
             "stir" -> sfx.play("omen", volume = 0.35f, rate = 1.6f)
             "flee" -> { sfx.play("whoosh"); sfx.play("steps", 150) }
+            "quest" -> { sfx.play("coins"); sfx.play("levelup", 300, 0.7f); sfx.narrate("Quest complete: ${f.say}", 500) }
             "bind" -> { sfx.play("npc"); sfx.speak(f.taunt, pitch, 1.0f, 300) }
             else -> {
                 if (f.power.isNotBlank()) sfx.play("legendary", 0, 0.6f, 1.2f)
@@ -618,6 +689,7 @@ class GameSession(private val app: Application) {
         val omens = signals.zip(texts).map { (sig, t) -> Omen(sig.name, t.name, t.lore, t.threat, sig.dbm) }
         statsStore.update { it.copy(omensRead = it.omensRead + omens.size) }
         val lair = omens.filter { it.threat >= 4 }.maxByOrNull { it.dbm }
+        questEvent("omens")
         state.update { s ->
             var next = s.copy(busy = false, omens = omens, bossLair = lair, fx = Fx(nextSeq(s), label = "omens"))
             omens.forEach { o -> next = next.withLog("${"☠".repeat(o.threat)} ${o.name} (\"${o.signal}\"): ${o.lore}") }
@@ -710,6 +782,7 @@ class GameSession(private val app: Application) {
                 s
             }
             buzz(30, 30, 30); onPhaseChanged(Phase.NPC)
+            questEvent("meet")
         }
         broadcast()
         state.value.monster?.sprite?.takeIf { it.isNotBlank() }?.let { sendSprite(it) }
@@ -810,6 +883,7 @@ class GameSession(private val app: Application) {
             if (reply.isNotBlank()) next = next.withLog("${npc.emoji} ${reply.take(220)}")
             next
         }
+        if (state.value.fx?.xpSpent ?: 0 > 0) questEvent("buy")
         broadcast()
     }
 
@@ -915,13 +989,14 @@ class GameSession(private val app: Application) {
         var parleyWon = false
         var hurtMul = 1f
         when (power?.first) {
-            "Taunt" -> if (r.style >= 3) { dazeNow = true; powerLog = "😤 Taunt lands — ${m.name} is dazed, its next strike is halved" } else powerLog = "😤 The taunt falls flat."
+            "Taunt" -> if (r.style >= 3) { dazeNow = true; powerLog = "😤 Taunt lands — ${m.name} is dazed, its next strike is halved"; questEvent("taunt") } else powerLog = "😤 The taunt falls flat."
             "Parley" -> if (r.style >= 4) { parleyWon = true; powerLog = "🕊 Parley! ${m.name} lowers its guard and listens." } else { hurtMul = 2f; powerLog = "🕊 ${m.name} isn't listening — and punishes the pause." }
             "Recast" -> if (!s0.recastUsed && power.second.isNotBlank()) { recastTo = power.second; powerLog = "🔮 Recast: ${m.name} is now weak to ${power.second}" } else powerLog = "🔮 Recast fizzles."
             else -> {}
         }
         if (parleyWon) {
             recordEncounter(s0, "parleyed by ${p.name}")
+            questEvent("parley")
             state.update { s ->
                 val me = (s.players[p.id] ?: p).copy(xp = (s.players[p.id] ?: p).xp + 40)
                 s.copy(phase = Phase.NPC, busy = false, windup = 0, players = s.players + (me.id to me),
@@ -1009,8 +1084,14 @@ class GameSession(private val app: Application) {
         val after = state.value
         if (after.phase == Phase.DEFEAT) { statsStore.update { it.copy(wipes = it.wipes + 1) }; recordEncounter(after, "wiped the party"); onPhaseChanged(Phase.DEFEAT) }
         broadcast()
+        if (parried && r.damageToPlayer > 0) questEvent("parry")
+        if (r.style >= 5) questEvent("legendary")
         if (killed) {
             lastSlain = m.copy(hp = 0)
+            questEvent("kill")
+            if (boss) questEvent("boss")
+            if (s0.ambush) questEvent("ambush")
+            if (audioWav != null) questEvent("voicekill")
             windupJob?.cancel(); onPhaseChanged(Phase.VICTORY)
             if (playerId == selfId) buzz(40, 60, 40, 60, 200)
             val (loot, line) = runCatching { g.loot(m.name, p.name) }.getOrElse { null to "" }
@@ -1019,11 +1100,13 @@ class GameSession(private val app: Application) {
                 val me = s.players[p.id] ?: return@update s
                 var next = s
                 if (loot != null) next = next.copy(players = next.players + (me.id to me.copy(items = (me.items + Item(loot.name, loot.effect)).takeLast(BAG_SLOTS))), victory = next.victory?.copy(loot = loot.name, lootEffect = loot.effect)).withLog("🎁 ${me.name} loots ${loot.name}: ${loot.effect}")
+
                 if (line.isNotBlank()) next = next.withLog(line.take(200))
                 if (companionCapacity(me.level) > me.companions.size) next = next.withLog("🐾 Level ${me.level} power: you may Bind ${m.name} as a companion.")
                 next
             }
             broadcast()
+            if (loot != null) questEvent("loot")
         }
         if (leveledTo > 0) grantEpithet(p.id, leveledTo)
     }
@@ -1062,7 +1145,7 @@ class GameSession(private val app: Application) {
             s.copy(players = s.players + (me.id to me.copy(companions = me.companions + c)), fx = Fx(nextSeq(s), selfId, label = "bind", taunt = "I SERVE... FOR NOW."))
                 .withLog("🐾 ${c.emoji} ${c.name} is bound to ${me.name}. It will use ${c.attack} every turn.")
         }
-        lastSlain = null; broadcast()
+        lastSlain = null; questEvent("bind"); broadcast()
     }
 
     fun nextEncounter() {
@@ -1091,7 +1174,7 @@ class GameSession(private val app: Application) {
             windupJob?.cancel(); steps.reset()
             state.update { s -> s.copy(phase = Phase.EXPLORE, monster = null, windup = 0, fx = Fx(nextSeq(s), selfId, label = "flee"))
                 .withLog("🏃 ${me.name} slips away from ${m.name} (${(chance * 100).toInt()}% chance, $moved steps). No loot, no shame.") }
-            onPhaseChanged(Phase.EXPLORE); broadcast()
+            onPhaseChanged(Phase.EXPLORE); questEvent("escape"); broadcast()
         } else {
             state.update { s -> s.withLog("🏃 ${me.name} tries to run (${(chance * 100).toInt()}% chance)… ${m.name} is faster.") }
             if (fromChase) reanchorMonster(chase = true) else scope.launch { monsterTurn() }

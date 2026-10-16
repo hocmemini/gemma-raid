@@ -38,6 +38,7 @@ data class Stats(
     val omensRead: Int = 0,
     val lurkersSeen: Int = 0,
     val ambushes: Int = 0,
+    val questsDone: Int = 0,
     val playSeconds: Int = 0,
     val longestFightTurns: Int = 0,
     // Gemma, host only

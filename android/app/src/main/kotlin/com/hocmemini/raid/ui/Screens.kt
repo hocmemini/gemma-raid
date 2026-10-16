@@ -195,6 +195,7 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit, onMo
     val debug by vm.debugHud.collectAsState()
     var confirmLeave by remember { mutableStateOf(false) }
     var showBag by remember { mutableStateOf(false) }
+    var showQuests by remember { mutableStateOf(false) }
 
     BackHandler { confirmLeave = true }
     if (confirmLeave) {
@@ -207,6 +208,26 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit, onMo
         )
     }
 
+    if (showQuests) {
+        AlertDialog(
+            onDismissRequest = { showQuests = false },
+            title = { Text("📜 Quests · ${state.questsDone} done") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (state.quests.isEmpty()) Text("The host's quest board is empty.")
+                    state.quests.forEach { q ->
+                        Column {
+                            Text("${if (q.done) "✅" else "▸"} ${q.title}", fontWeight = FontWeight.SemiBold)
+                            LinearProgressIndicator(progress = { q.progress.toFloat() / q.target }, modifier = Modifier.fillMaxWidth().height(5.dp))
+                            Text("${q.progress}/${q.target} · reward ${q.rewardXp} XP + a potion", fontSize = 12.sp)
+                        }
+                    }
+                    Text("New quests replace finished ones. Progress comes from real events: kills, buys, parries, steps, ambushes.", fontSize = 11.sp, color = Dungeon.parchment.copy(alpha = 0.6f))
+                }
+            },
+            confirmButton = { TextButton({ showQuests = false }) { Text("Close") } },
+        )
+    }
     if (showBag) {
         val me = state.players[vm.selfId]
         AlertDialog(
@@ -314,6 +335,7 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit, onMo
                     state.bossLair?.let { add("👑 lair of ${it.name}") }
                     if (state.phase == Phase.EXPLORE && isHost && steps > 0) add("👣 $steps")
                     if (state.lurking > 0 && state.phase == Phase.EXPLORE) add("👁 ${state.lurking} lurking")
+                    state.quests.firstOrNull { !it.done }?.let { add("📜 ${it.title} (${it.progress}/${it.target})") }
                 }
                 if (chips.isNotEmpty()) Text(chips.joinToString(" · "), color = Color.White.copy(alpha = 0.9f), fontSize = 12.sp,
                     modifier = Modifier.background(Color.Black.copy(alpha = 0.4f), RoundedCornerShape(6.dp)).padding(4.dp))
@@ -340,6 +362,7 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit, onMo
         Box(Modifier.align(Alignment.TopEnd).safeDrawingPadding().padding(12.dp)) {
             OutlinedButton({ menuOpen = true }) { Text("☰") }
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                DropdownMenuItem(text = { Text("📜 Quests") }, onClick = { menuOpen = false; showQuests = true })
                 DropdownMenuItem(text = { Text("🎒 Inventory") }, onClick = { menuOpen = false; showBag = true })
                 DropdownMenuItem(text = { Text("📖 Journal") }, onClick = { menuOpen = false; onJournal() })
                 DropdownMenuItem(text = { Text("🧠 Brain (model)") }, onClick = { menuOpen = false; onModel() })
@@ -711,7 +734,7 @@ private fun FxLayer(fx: Fx?, selfId: String) {
             launch { slashX.snapTo(-1.2f); slashX.animateTo(1.2f, tween(380, easing = LinearEasing)); slashX.snapTo(-2f) }
             launch { numA.snapTo(1f); numY.snapTo(0f); numY.animateTo(-300f, tween(950)); numA.animateTo(0f, tween(250)) }
         }
-        if (f.parried || f.killed || f.potion > 0 || f.item.isNotBlank() || f.label.isNotBlank() && f.label != "spawn") {
+        if (f.parried || f.killed || f.potion > 0 || f.item.isNotBlank() || f.label == "quest" || f.label.isNotBlank() && f.label != "spawn" && f.label != "say" && f.label != "stir" && f.label != "omens" && f.label != "chase" && f.label != "pin") {
             launch { banner.snapTo(1f); kotlinx.coroutines.delay(1300); banner.animateTo(0f, tween(450)) }
         }
         if (f.taken > 0 && f.playerId == selfId) {
@@ -728,6 +751,7 @@ private fun FxLayer(fx: Fx?, selfId: String) {
         if (fx.label.startsWith("🧪")) add(fx.label)
         if (fx.potion > 0) add("🧪 +${fx.potion}")
         if (fx.item.isNotBlank()) add("🎁 ${fx.item}")
+        if (fx.label == "quest") add("📜 QUEST COMPLETE\n${fx.say}")
     }.joinToString("\n")
 
     Box(Modifier.fillMaxSize()) {
