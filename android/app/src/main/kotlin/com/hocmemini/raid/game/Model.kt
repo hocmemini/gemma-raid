@@ -30,6 +30,12 @@ data class Monster(
     val offer: String = "",
 )
 
+@Serializable
+data class Item(val name: String, val effect: String = "") {
+    override fun toString() = if (effect.isBlank()) name else "$name ($effect)"
+}
+const val BAG_SLOTS = 6
+
 /** A bound monster that fights beside its captor. */
 @Serializable
 data class Ally(val name: String, val emoji: String, val attack: String, val sprite: String = "")
@@ -46,7 +52,7 @@ data class Player(
     val acc: Float = 999f,
     val xp: Int = 0,
     val level: Int = 1,
-    val items: List<String> = emptyList(),
+    val items: List<Item> = emptyList(),
     val potions: Int = 2,
     /** Once per raid: at 0 HP you get back up with a few HP instead of going down. */
     val secondWind: Boolean = true,

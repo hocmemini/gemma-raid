@@ -31,6 +31,9 @@ data class Trade(val item: String, val effect: String, val priceXp: Int)
  * The tools Gemma 4 calls. LiteRT-LM runs them automatically mid-generation; they just stash
  * their arguments so the game loop can read structured results after sendMessage returns.
  */
+fun splitList(s: String): List<String> = s.split(",", ";", "\n").map { it.trim().trim('"', '\'') }.filter { it.isNotBlank() }.take(4)
+fun splitEmoji(s: String): List<String> = s.split(" ", ",").map { it.trim() }.filter { it.isNotBlank() }.map { it.take(4) }.take(3)
+
 class GameTools : ToolSet {
     @Volatile var spawned: SpawnedMonster? = null
     @Volatile var resolved: Resolved? = null
@@ -62,11 +65,11 @@ class GameTools : ToolSet {
         @ToolParam(description = "Character name derived from the object, e.g. 'Brenda the Stapler-Smith'") name: String,
         @ToolParam(description = "One of: merchant, sage, healer, oddball") role: String,
         @ToolParam(description = "One single emoji for the character") emoji: String,
-        @ToolParam(description = "Two or three single emoji features to draw on the object: eyes, a hat, a tool") accessories: List<String>,
+        @ToolParam(description = "Two or three single emoji features to draw on the object, separated by spaces, e.g. 👀 🎩") accessories: String,
         @ToolParam(description = "What they say as the players walk up, under 15 words") greeting: String,
         @ToolParam(description = "One short line of what they offer: wares, wisdom, healing or nonsense") offer: String,
     ): Map<String, Any> {
-        npc = SpawnedNpc(name.take(40), role.lowercase().take(12), emoji.take(4).ifBlank { "🙂" }, accessories.map { it.trim().take(4) }.filter { it.isNotBlank() }.take(3), greeting.take(90), offer.take(90))
+        npc = SpawnedNpc(name.take(40), role.lowercase().take(12), emoji.take(4).ifBlank { "🙂" }, splitEmoji(accessories), greeting.take(90), offer.take(90))
         Log.i("Gemma", "spawn_npc $name role=$role | $greeting")
         return mapOf("ok" to true)
     }
@@ -108,15 +111,14 @@ class GameTools : ToolSet {
     fun spawn_monster(
         @ToolParam(description = "Short dramatic monster name derived from the object, e.g. 'The Vending Golem'") name: String,
         @ToolParam(description = "Hit points from 20 to 60, higher for bigger or sturdier objects") hp: Int,
-        @ToolParam(description = "Two or three attack names themed on the object") attacks: List<String>,
+        @ToolParam(description = "Two or three attack names themed on the object, comma separated") attacks: String,
         @ToolParam(description = "One short phrase for what it is weak against, something players could plausibly do or find nearby") weakness: String,
         @ToolParam(description = "One or two vivid sentences introducing the monster to the players") flavor: String,
         @ToolParam(description = "One single emoji that best represents this monster") emoji: String,
-        @ToolParam(description = "Two or three single emoji to draw onto the real object as its features: eyes, horns, a weapon, an aura. Example: 👀, 🗡️, 🔥") accessories: List<String>,
+        @ToolParam(description = "Two or three single emoji to draw onto the real object as its features, separated by spaces, e.g. 👀 🗡️ 🔥") accessories: String,
         @ToolParam(description = "One short line the monster shouts at the players as it appears, ALL CAPS, under 8 words") taunt: String,
     ): Map<String, Any> {
-        spawned = SpawnedMonster(name, hp.coerceIn(10, 80), attacks, weakness, flavor, emoji.take(4).ifBlank { "👾" },
-            accessories.map { it.trim().take(4) }.filter { it.isNotBlank() }.take(3), taunt.take(60))
+        spawned = SpawnedMonster(name, hp.coerceIn(10, 80), splitList(attacks), weakness, flavor, emoji.take(4).ifBlank { "👾" }, splitEmoji(accessories), taunt.take(60))
         Log.i("Gemma", "spawn_monster $name hp=$hp weak=$weakness attacks=$attacks | $flavor")
         return mapOf("ok" to true)
     }
@@ -134,14 +136,14 @@ class GameTools : ToolSet {
         return mapOf("ok" to true)
     }
 
-    @Tool(description = "Turn the list of nearby wireless signal names into dungeon lore. Call exactly once, with one entry per signal, same order.")
+    @Tool(description = "Turn the list of nearby wireless signal names into dungeon lore. Call exactly once.")
     fun write_omens(
-        @ToolParam(description = "A spooky or funny entity name for each signal, same order as given") names: List<String>,
-        @ToolParam(description = "One short sentence of lore for each signal, same order") lores: List<String>,
-        @ToolParam(description = "Threat level 1 to 5 for each signal, same order; 5 only for something that sounds powerful or ominous") threats: List<Int>,
+        @ToolParam(description = "One line per signal, in the given order, formatted exactly as: entity name | one sentence of lore | threat 1-5") lines: String,
     ): Map<String, Any> {
-        val n = minOf(names.size, lores.size, threats.size)
-        omens = (0 until n).map { OmenText(names[it].take(40), lores[it].take(140), threats[it].coerceIn(1, 5)) }
+        omens = lines.lines().mapNotNull { ln ->
+            val parts = ln.split("|").map { it.trim() }
+            if (parts.size < 2) null else OmenText(parts[0].removePrefix("-").trim().take(40), parts[1].take(140), parts.getOrNull(2)?.filter { it.isDigit() }?.take(1)?.toIntOrNull()?.coerceIn(1, 5) ?: 2)
+        }.take(8)
         return mapOf("ok" to true)
     }
 
@@ -202,15 +204,26 @@ class Gemma(private val modelPath: String, private val useGpu: Boolean) {
         return c
     }
 
-    /** Send on the current conversation; if the runtime chokes (e.g. context full), start a fresh one and retry once. */
+    /**
+     * Send on the current conversation. If LiteRT-LM's strict tool-call parser rejects the model's
+     * output (a slipped quote token is enough), recover the arguments leniently from the raw response
+     * and run the tool ourselves — no second 15 s generation. Other failures reset the conversation and retry once.
+     */
     private fun send(contents: Contents): Message {
         val c = conversation ?: newConversation()
         turns++
         return try {
             c.sendMessage(contents)
         } catch (e: Exception) {
-            Log.w(TAG, "sendMessage failed (${e.message}); resetting conversation")
-            newConversation().sendMessage(contents)
+            val msg = e.message ?: ""
+            val raw = msg.substringAfter("full response:", "").substringBefore("\nerror:").trim()
+            if (raw.contains("call:") && LenientTools.recover(raw, tools)) {
+                Log.w(TAG, "strict tool parse failed; recovered leniently from raw response")
+                Message.model("")
+            } else {
+                Log.w(TAG, "sendMessage failed (${msg.take(160)}); resetting conversation")
+                newConversation().sendMessage(contents)
+            }
         }
     }
 
@@ -258,7 +271,7 @@ class Gemma(private val modelPath: String, private val useGpu: Boolean) {
         }
         val situation = buildString {
             append("$playerName acts against $monsterName (HP $monsterHp, weak to: $weakness). ")
-            if (items.isNotEmpty()) append("$playerName carries: ${items.joinToString(", ")}. If they use one by name, also call use_item. ")
+            if (items.isNotEmpty()) append("$playerName carries: ${items.joinToString("; ")}. If they use one by name, also call use_item. ")
             if (potions > 0) append("$playerName has $potions healing potion${if (potions > 1) "s" else ""}; if they say they drink one, also call drink_potion. ")
             if (powers.isNotEmpty()) append("$playerName's powers, invoked by name: ${powers.joinToString(", ")}. If they invoke one, also call use_power. ")
             if (!facing) append("They are NOT facing the monster, so the action mostly misses. ")
@@ -335,8 +348,8 @@ class Gemma(private val modelPath: String, private val useGpu: Boolean) {
         val c = newConversation()
         val t0 = System.currentTimeMillis()
         val list = signals.mapIndexed { i, n -> "${i + 1}. \"$n\"" }.joinToString("\n")
-        var reply = c.sendMessage(Contents.of("The players sense ${signals.size} wireless signals nearby — Wi-Fi networks and Bluetooth devices — in this order:\n$list\nTreat each name as the name of a spirit, faction or creature haunting this place. Call write_omens once with lists for all ${signals.size}, then say one short ominous line."))
-        if (tools.omens == null) reply = c.sendMessage(Contents.of("Call the write_omens tool now with all ${signals.size} entries."))
+        var reply = c.sendMessage(Contents.of("The players sense ${signals.size} wireless signals nearby — Wi-Fi networks and Bluetooth devices — in this order:\n$list\nTreat each name as the name of a spirit, faction or creature haunting this place. Call write_omens once with one line per signal (entity name | lore | threat), then say one short ominous line."))
+        if (tools.omens == null) reply = c.sendMessage(Contents.of("Call the write_omens tool now, one line per signal."))
         Log.i(TAG, "omens took ${System.currentTimeMillis() - t0} ms; tool=${tools.omens != null}")
         c.close(); conversation = keep
         tools.omens to reply.plainText()
@@ -385,5 +398,37 @@ Reward wit: an absurd, specific, funny action that fits the object (a TSA liquid
 Never declare the monster or a player dead, defeated or victorious; the game engine decides and announces that. Describe the blow and its effect only."""
         const val SPAWN_PROMPT = """Look at this photo. Pick the most prominent object or feature and turn it into a monster.
 Call spawn_monster with a name, hp, attacks, a weakness, flavor text, an emoji, 2-3 emoji features to draw on the object, and a taunt; then say one short line to the players."""
+    }
+}
+
+
+/** Pulls `call:tool{key:<|"|>value<|"|>,n:12,...}` apart without caring about a missing quote token here or there. */
+object LenientTools {
+    private val Q = "<|\"|>"
+
+    fun recover(raw: String, t: GameTools): Boolean {
+        val m = Regex("call:(\\w+)\\{(.*)", RegexOption.DOT_MATCHES_ALL).find(raw) ?: return false
+        val tool = m.groupValues[1]
+        val body = m.groupValues[2].substringBeforeLast("}")
+        fun str(key: String): String {
+            val r = Regex("(?:^|[,{\\s])$key:\\s*(?:$Q)?(.*?)(?:$Q)?\\s*(?=,\\s*\\w+:|$)", RegexOption.DOT_MATCHES_ALL).find(body) ?: return ""
+            return r.groupValues[1].replace(Q, "\"").trim().trim('"', '[', ']').trim()
+        }
+        fun int(key: String, def: Int): Int = Regex("$key:\\s*(\\d+)").find(body)?.groupValues?.get(1)?.toIntOrNull() ?: def
+        return when (tool) {
+            "spawn_monster" -> { t.spawn_monster(str("name").ifBlank { "The Thing" }, int("hp", 30), str("attacks").replace("\"", ","), str("weakness").ifBlank { "a clever idea" }, str("flavor"), str("emoji").ifBlank { "👾" }, str("accessories").replace("\"", " "), str("taunt")); true }
+            "resolve_action" -> { t.resolve_action(int("damageToMonster", 4), int("damageToPlayer", 2), str("narration").ifBlank { "The blow lands, more or less." }, int("style", 3), str("taunt")); true }
+            "spawn_npc" -> { t.spawn_npc(str("name").ifBlank { "A Stranger" }, str("role").ifBlank { "oddball" }, str("emoji").ifBlank { "🙂" }, str("accessories").replace("\"", " "), str("greeting"), str("offer")); true }
+            "drop_loot" -> { t.drop_loot(str("name").ifBlank { "a curious trinket" }, str("effect")); true }
+            "monster_strike" -> { t.monster_strike(int("damageToPlayer", 3), str("narration"), str("taunt")); true }
+            "sell_item" -> { t.sell_item(str("name"), str("effect"), int("priceXp", 50)); true }
+            "give_item" -> { t.give_item(str("name"), str("effect")); true }
+            "heal_player" -> { t.heal_player(int("amount", 10)); true }
+            "use_power" -> { t.use_power(str("power"), str("argument")); true }
+            "grant_epithet" -> { t.grant_epithet(str("title")); true }
+            "drink_potion" -> { t.drink_potion(); true }
+            "write_omens" -> { t.write_omens(str("lines")); true }
+            else -> false
+        }
     }
 }

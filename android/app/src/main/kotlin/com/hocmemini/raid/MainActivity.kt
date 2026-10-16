@@ -28,6 +28,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import com.hocmemini.raid.ui.RaidApp
+import com.hocmemini.raid.ui.RaidTheme
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -36,7 +37,7 @@ class MainActivity : ComponentActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         val session = (application as RaidApplication).session
         setContent {
-            MaterialTheme(colorScheme = darkColorScheme()) {
+            RaidTheme {
                 Surface(Modifier.fillMaxSize()) {
                     PermissionGate { RaidApp(session) }
                 }

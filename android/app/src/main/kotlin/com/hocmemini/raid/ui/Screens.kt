@@ -61,6 +61,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.LinearProgressIndicator
@@ -90,6 +91,8 @@ import com.hocmemini.raid.game.Monster
 import com.hocmemini.raid.game.Phase
 import com.hocmemini.raid.game.headingDelta
 import com.hocmemini.raid.game.companionCapacity
+import com.hocmemini.raid.game.BAG_SLOTS
+import com.hocmemini.raid.game.powerUnlockedAt
 import com.hocmemini.raid.game.powersFor
 import kotlinx.coroutines.delay
 import kotlin.math.abs
@@ -122,8 +125,8 @@ fun LobbyScreen(vm: GameSession, onStats: () -> Unit) {
         Modifier.fillMaxSize().safeDrawingPadding().padding(24.dp).verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        Text("RAID", fontSize = 40.sp, fontWeight = FontWeight.Black)
-        Text("Real objects become monsters. Fight them together. No internet, no server: Gemma 4 runs on the host's phone.")
+        Text("⚔ RAID", style = MaterialTheme.typography.displayLarge, color = Dungeon.gold)
+        Text("Real objects become monsters. Fight them together. No internet, no server: Gemma 4 runs on the host's phone.", color = Dungeon.parchment.copy(alpha = 0.85f))
         vm.characterSummary()?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = Color(0xFFFFD54F)) }
         OutlinedTextField(name, { name = it }, label = { Text("Your name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
 
@@ -167,6 +170,7 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit) {
     val narrate by vm.narrateAloud.collectAsState()
     val debug by vm.debugHud.collectAsState()
     var confirmLeave by remember { mutableStateOf(false) }
+    var showBag by remember { mutableStateOf(false) }
 
     BackHandler { confirmLeave = true }
     if (confirmLeave) {
@@ -176,6 +180,39 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit) {
             text = { Text(if (role == GameSession.Role.HOST) "Your party will be disconnected. Gemma stays loaded." else "You'll drop out of the host's party.") },
             confirmButton = { Button({ confirmLeave = false; vm.leave() }) { Text("Leave") } },
             dismissButton = { TextButton({ confirmLeave = false }) { Text("Stay") } },
+        )
+    }
+
+    if (showBag) {
+        val me = state.players[vm.selfId]
+        AlertDialog(
+            onDismissRequest = { showBag = false },
+            title = { Text("🎒 ${me?.name ?: "Your"} bag") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (me != null) {
+                        Text("Level ${me.level}${if (me.epithet.isNotBlank()) " · ${me.epithet}" else ""} · ${me.xp} XP · ${me.hp}/${me.maxHp} HP · 🧪 ${me.potions}", fontWeight = FontWeight.Bold)
+                        Text("Items (${me.items.size}/$BAG_SLOTS slots). Use one by saying its name in a fight: ×1.5 damage.", fontSize = 12.sp)
+                        if (me.items.isEmpty()) Text("Empty. Loot monsters, charm NPCs, or buy with XP.", fontSize = 13.sp)
+                        me.items.forEach { it ->
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) { Text("🎁 ${it.name}", fontWeight = FontWeight.SemiBold); if (it.effect.isNotBlank()) Text(it.effect, fontSize = 12.sp) }
+                                if (role == GameSession.Role.HOST) TextButton({ vm.dropItem(it.name) }) { Text("drop") }
+                            }
+                        }
+                        if (me.companions.isNotEmpty()) {
+                            Text("Companions", fontWeight = FontWeight.Bold)
+                            me.companions.forEach { Text("${it.emoji} ${it.name} — ${it.attack} every turn") }
+                        }
+                        val powers = powersFor(me.level)
+                        Text("Powers", fontWeight = FontWeight.Bold)
+                        if (powers.isEmpty()) Text("None yet. Level 2 unlocks Taunt.", fontSize = 13.sp)
+                        powers.forEach { pw -> Text("• ${powerUnlockedAt(listOf("Taunt", "Parley", "Bind", "Recast").indexOf(pw) + 2) ?: pw}", fontSize = 13.sp) }
+                        powerUnlockedAt(me.level + 1)?.let { Text("Next level: $it", fontSize = 12.sp, color = Color(0xFFFFD54F)) }
+                    }
+                }
+            },
+            confirmButton = { TextButton({ showBag = false }) { Text("Close") } },
         )
     }
 
@@ -206,6 +243,7 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit) {
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         CameraPreview(Modifier.fillMaxSize()) { imageCapture = it }
+        DungeonVignette(intensity = if (state.phase == Phase.BATTLE) 1f else 0.8f)
         // long-press anywhere: re-pin the monster to where you're looking (compass drift fix)
         if (isHost && (state.phase == Phase.BATTLE || state.phase == Phase.NPC)) {
             Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures(onLongPress = { vm.reanchorMonster(chase = false) }) })
@@ -220,7 +258,7 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit) {
         Column(Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 state.players.values.forEach { p ->
-                    Column(Modifier.background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(8.dp)).padding(6.dp)) {
+                    Column(Modifier.background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(8.dp)).pointerInput(p.id) { detectTapGestures { if (p.id == vm.selfId) showBag = true } }.padding(6.dp)) {
                         Text(
                             "${p.name}${if (p.epithet.isNotBlank()) " ${p.epithet}" else ""} · L${p.level}",
                             color = if (p.hp > 0) Color.White else Color.Red,
@@ -228,7 +266,7 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit) {
                         )
                         LinearProgressIndicator(progress = { p.hp.toFloat() / p.maxHp }, modifier = Modifier.width(120.dp).height(5.dp))
                         Text("${p.hp}/${p.maxHp} · ${p.xp} xp · 🧪${p.potions}${if (p.companions.isNotEmpty()) " · " + p.companions.joinToString("") { it.emoji } else ""}", color = Color.White.copy(alpha = 0.85f), fontSize = 11.sp)
-                        if (p.items.isNotEmpty()) Text("🎁 " + p.items.takeLast(3).joinToString(" · "), color = Color(0xFFFFD54F), fontSize = 11.sp)
+                        if (p.items.isNotEmpty()) Text("🎁 " + p.items.takeLast(3).joinToString(" · ") { it.name }, color = Color(0xFFFFD54F), fontSize = 11.sp)
                     }
                 }
             }
@@ -259,6 +297,7 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit) {
         Box(Modifier.align(Alignment.TopEnd).safeDrawingPadding().padding(12.dp)) {
             OutlinedButton({ menuOpen = true }) { Text("☰") }
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                DropdownMenuItem(text = { Text("🎒 Inventory") }, onClick = { menuOpen = false; showBag = true })
                 DropdownMenuItem(text = { Text("📊 Stats") }, onClick = { menuOpen = false; onStats() })
                 DropdownMenuItem(text = { Text(if (vm.sfx.muted) "🔈 Unmute" else "🔇 Mute") }, onClick = { vm.sfx.muted = !vm.sfx.muted; menuOpen = false })
                 DropdownMenuItem(text = { Text(if (narrate) "🗣 Stop narrating aloud" else "🗣 Narrate aloud") }, onClick = { vm.narrateAloud.value = !narrate; menuOpen = false })
@@ -271,10 +310,19 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit) {
 
         // bottom: log + controls
         Column(
-            Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Color.Black.copy(alpha = 0.65f)).safeDrawingPadding().padding(12.dp),
+            Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Dungeon.stone.copy(alpha = 0.78f)).safeDrawingPadding().padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            state.log.takeLast(4).forEach { Text(it, color = Color.White, fontSize = 14.sp) }
+            state.log.takeLast(4).forEach { line ->
+                val tint = when {
+                    line.startsWith("−") || line.contains("LEGENDARY") -> Dungeon.gold
+                    line.startsWith("📜") || line.startsWith("🏷") -> Dungeon.parchment
+                    line.startsWith("🧪") || line.startsWith("💚") -> Dungeon.moss
+                    line.startsWith("⚡") || line.contains("falls") -> Dungeon.ember
+                    else -> Color.White
+                }
+                Text(line, color = tint, fontSize = 14.sp)
+            }
             if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
             else if (state.phase == Phase.BATTLE && state.windup > 0) {
                 LinearProgressIndicator(progress = { state.windup / 100f }, modifier = Modifier.fillMaxWidth().height(4.dp), color = if (state.windup > 70) Color(0xFFFF5252) else Color(0xFFFFA726))
@@ -282,6 +330,20 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit) {
             val alive = (self?.hp ?: 1) > 0
             val canTalk = state.phase == Phase.BATTLE || state.phase == Phase.EXPLORE || state.phase == Phase.NPC
             if (canTalk) {
+                val chips = when (state.phase) {
+                    Phase.NPC -> listOf("What's for sale?", "Heal me", "Tell me a secret", "Anything for free?")
+                    Phase.EXPLORE -> listOf("Any tips?", "What is this place?", "Who are you?")
+                    else -> powersFor(self?.level ?: 1).map { if (it == "Recast") "I recast its weakness to…" else "I $it it!" }
+                }
+                if (chips.isNotEmpty() && !state.busy) {
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        chips.forEach { c ->
+                            OutlinedButton({ if (c.endsWith("…")) action = c.dropLast(1) + " " else vm.act(c) }, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 2.dp)) {
+                                Text(c, fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     OutlinedButton({ vm.drinkPotion() }, enabled = (self?.potions ?: 0) > 0 && (self?.hp ?: 0) < (self?.maxHp ?: 1)) { Text("🧪${self?.potions ?: 0}") }
                     OutlinedTextField(
@@ -304,7 +366,8 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit) {
                 }
                 Box(
                     Modifier.fillMaxWidth().height(52.dp)
-                        .background(if (recording) Color(0xFFD32F2F) else if (alive || state.phase != Phase.BATTLE) Color(0xFF3949AB) else Color.DarkGray, RoundedCornerShape(12.dp))
+                        .background(if (recording) Dungeon.blood else if (alive || state.phase != Phase.BATTLE) Dungeon.panel else Color.DarkGray, RoundedCornerShape(12.dp))
+                        .let { if (!recording) it.background(Dungeon.gold.copy(alpha = 0.12f), RoundedCornerShape(12.dp)) else it }
                         .pointerInput(alive, state.busy, state.phase) {
                             if (!alive && state.phase == Phase.BATTLE) return@pointerInput
                             detectTapGestures(onPress = { vm.voiceStart(); tryAwaitRelease(); vm.voiceStop() })

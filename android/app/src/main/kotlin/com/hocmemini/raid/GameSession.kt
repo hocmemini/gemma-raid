@@ -14,6 +14,8 @@ import com.hocmemini.raid.game.Ally
 import com.hocmemini.raid.game.Encounter
 import com.hocmemini.raid.game.Fx
 import com.hocmemini.raid.game.GameState
+import com.hocmemini.raid.game.Item
+import com.hocmemini.raid.game.BAG_SLOTS
 import com.hocmemini.raid.game.Monster
 import com.hocmemini.raid.game.Msg
 import com.hocmemini.raid.game.Omen
@@ -419,7 +421,7 @@ class GameSession(private val app: Application) {
         state.update { it.copy(busy = true, steps = walked).withLog("The dungeon master studies the scene…") }; broadcast()
         sfx.play("shutter")
         val path = runCatching { imageCapture.captureToFile(app) }
-            .getOrElse { state.update { s -> s.copy(busy = false).withLog("camera failed: ${it.message}") }; broadcast(); return@launch }
+            .getOrElse { state.update { s -> s.copy(busy = false).withLog("camera failed: ${it.message?.take(100)}") }; broadcast(); return@launch }
         val bearing = compass.heading.value
         val loc = locator.location.value
         val spriteJob = async(Dispatchers.IO) { runCatching { SpriteMaker.make(app, path) }.getOrNull() }
@@ -427,7 +429,7 @@ class GameSession(private val app: Application) {
         val lair = state.value.bossLair
         val t0 = System.currentTimeMillis()
         val (spawned, text) = runCatching { g.spawn(path, walked, conditions, lair?.let { "${it.name} (${it.lore})" }, reputation()) }
-            .getOrElse { spriteJob.cancel(); state.update { s -> s.copy(busy = false).withLog("Gemma error: ${it.message}") }; broadcast(); return@launch }
+            .getOrElse { spriteJob.cancel(); state.update { s -> s.copy(busy = false).withLog("Gemma error: ${it.message?.take(100)}") }; broadcast(); return@launch }
         if (spawned == null) {
             spriteJob.cancel()
             state.update { it.copy(busy = false).withLog("The DM hesitates: ${text.take(200)}") }
@@ -461,12 +463,12 @@ class GameSession(private val app: Application) {
         state.update { it.copy(busy = true).withLog("You approach…") }; broadcast()
         sfx.play("shutter")
         val path = runCatching { imageCapture.captureToFile(app) }
-            .getOrElse { state.update { s -> s.copy(busy = false).withLog("camera failed: ${it.message}") }; broadcast(); return@launch }
+            .getOrElse { state.update { s -> s.copy(busy = false).withLog("camera failed: ${it.message?.take(100)}") }; broadcast(); return@launch }
         val bearing = compass.heading.value
         val loc = locator.location.value
         val spriteJob = async(Dispatchers.IO) { runCatching { SpriteMaker.make(app, path) }.getOrNull() }
         val (npc, text) = runCatching { g.meet(path, env.describe()) }
-            .getOrElse { spriteJob.cancel(); state.update { s -> s.copy(busy = false).withLog("Gemma error: ${it.message}") }; broadcast(); return@launch }
+            .getOrElse { spriteJob.cancel(); state.update { s -> s.copy(busy = false).withLog("Gemma error: ${it.message?.take(100)}") }; broadcast(); return@launch }
         if (npc == null) {
             spriteJob.cancel()
             state.update { it.copy(busy = false).withLog("Nobody home: ${text.take(160)}") }
@@ -535,7 +537,7 @@ class GameSession(private val app: Application) {
         val p = state.value.players[playerId] ?: return
         if (state.value.busy) return
         state.update { it.copy(busy = true).withLog("${p.name}: ${text ?: "🎤 (asks the DM)"}") }; broadcast()
-        val summary = state.value.players.values.joinToString("; ") { "${it.name} L${it.level} ${it.hp}/${it.maxHp} HP, ${it.potions} potions, items: ${it.items.ifEmpty { listOf("none") }.joinToString()}" } + "; kills ${state.value.kills}"
+        val summary = state.value.players.values.joinToString("; ") { "${it.name} L${it.level} ${it.hp}/${it.maxHp} HP, ${it.potions} potions, items: ${it.items.ifEmpty { listOf(Item("none")) }.joinToString()}" } + "; kills ${state.value.kills}"
         val (reply, potion) = runCatching { g.dmChat(p.name, text, audioWav, summary) }.getOrElse { "" to false }
         state.update { s ->
             var me = s.players[p.id] ?: p
@@ -556,17 +558,17 @@ class GameSession(private val app: Application) {
         val p = s0.players[playerId] ?: return
         if (s0.busy) return
         state.update { it.copy(busy = true).withLog("${p.name}: ${text ?: "🎤 (speaks)"}") }; broadcast()
-        val (reply, effects) = runCatching { g.npcChat(p.name, text, audioWav, npc.name, npc.role, p.xp, p.items) }.getOrElse { "" to Triple(null, null, 0) }
+        val (reply, effects) = runCatching { g.npcChat(p.name, text, audioWav, npc.name, npc.role, p.xp, p.items.map { it.toString() }) }.getOrElse { "" to Triple(null, null, 0) }
         val (trade, gift, heal) = effects
         state.update { s ->
             var me = s.players[p.id] ?: p
             var next = s.copy(busy = false)
             var spent = 0; var item = ""; var healed = 0
             if (trade != null) {
-                if (me.xp >= trade.priceXp) { me = me.copy(xp = me.xp - trade.priceXp, items = (me.items + trade.item).takeLast(6)); spent = trade.priceXp; item = trade.item; next = next.withLog("💰 ${me.name} buys ${trade.item} for ${trade.priceXp} XP: ${trade.effect}") }
+                if (me.xp >= trade.priceXp) { me = me.copy(xp = me.xp - trade.priceXp, items = (me.items + Item(trade.item, trade.effect)).takeLast(BAG_SLOTS)); spent = trade.priceXp; item = trade.item; next = next.withLog("💰 ${me.name} buys ${trade.item} for ${trade.priceXp} XP: ${trade.effect}") }
                 else next = next.withLog("💰 ${trade.item} costs ${trade.priceXp} XP — ${me.name} has ${me.xp}.")
             }
-            if (gift != null) { me = me.copy(items = (me.items + gift.item).takeLast(6)); item = gift.item; next = next.withLog("🎁 ${npc.name} gives ${me.name} ${gift.item}: ${gift.effect}") }
+            if (gift != null) { me = me.copy(items = (me.items + Item(gift.item, gift.effect)).takeLast(BAG_SLOTS)); item = gift.item; next = next.withLog("🎁 ${npc.name} gives ${me.name} ${gift.item}: ${gift.effect}") }
             if (heal > 0 && me.hp < me.maxHp) { healed = min(heal, me.maxHp - me.hp); me = me.copy(hp = me.hp + healed); next = next.withLog("💚 ${npc.name} heals ${me.name}: +$healed HP") }
             next = next.copy(players = next.players + (me.id to me), fx = Fx(nextSeq(s), p.id, label = "say", say = reply, taunt = "", xpSpent = spent, item = item, potion = healed))
             if (reply.isNotBlank()) next = next.withLog("${npc.emoji} ${reply.take(220)}")
@@ -640,8 +642,8 @@ class GameSession(private val app: Application) {
         val shown = text ?: "🎤 (${(audioWav!!.size - 44) / 32000}s of shouting)"
         state.update { it.copy(busy = true, windup = 0, players = it.players + (p.id to p)).withLog("${p.name}: $shown") }; broadcast()
         val t0 = System.currentTimeMillis()
-        val (r, reply) = runCatching { g.resolve(p.name, text, audioWav, m.name, m.hp, m.weakness, facing, flanking, p.items, p.potions, powersFor(p.level)) }
-            .getOrElse { state.update { s -> s.copy(busy = false).withLog("Gemma error: ${it.message}") }; broadcast(); return }
+        val (r, reply) = runCatching { g.resolve(p.name, text, audioWav, m.name, m.hp, m.weakness, facing, flanking, p.items.map { it.toString() }, p.potions, powersFor(p.level)) }
+            .getOrElse { state.update { s -> s.copy(busy = false).withLog("Gemma error: ${it.message?.take(100)}") }; broadcast(); return }
         statsStore.update { it.copy(resolves = it.resolves + 1, resolveMs = it.resolveMs + (System.currentTimeMillis() - t0), audioResolves = it.audioResolves + (if (audioWav != null) 1 else 0), toolRetries = g.retries) }
         if (r == null) { state.update { it.copy(busy = false).withLog("The DM mumbles: ${reply.take(200)}") }; broadcast(); return }
 
@@ -677,7 +679,7 @@ class GameSession(private val app: Application) {
         if (dmg > 0) dmg += cry
         val crit = r.style >= 4
         if (r.style >= 5) dmg *= 2 else if (r.style == 4) dmg = (dmg * 1.5f).roundToInt()
-        val itemUsed = r.usedItem?.let { want -> p.items.firstOrNull { it.equals(want, true) || it.contains(want, true) || want.contains(it, true) } }
+        val itemUsed = r.usedItem?.let { want -> p.items.firstOrNull { it.name.equals(want, true) || it.name.contains(want, true) || want.contains(it.name, true) }?.name }
         if (itemUsed != null && dmg > 0) dmg = (dmg * 1.5f).roundToInt()
         val wantsPotion = r.drankPotion && p.potions > 0
         // companions pile on
@@ -756,7 +758,7 @@ class GameSession(private val app: Application) {
             state.update { s ->
                 val me = s.players[p.id] ?: return@update s
                 var next = s
-                if (loot != null) next = next.copy(players = next.players + (me.id to me.copy(items = (me.items + loot.name).takeLast(6)))).withLog("🎁 ${me.name} loots ${loot.name}: ${loot.effect}")
+                if (loot != null) next = next.copy(players = next.players + (me.id to me.copy(items = (me.items + Item(loot.name, loot.effect)).takeLast(BAG_SLOTS)))).withLog("🎁 ${me.name} loots ${loot.name}: ${loot.effect}")
                 if (line.isNotBlank()) next = next.withLog(line.take(200))
                 if (companionCapacity(me.level) > me.companions.size) next = next.withLog("🐾 Level ${me.level} power: you may Bind ${m.name} as a companion.")
                 next
@@ -779,6 +781,14 @@ class GameSession(private val app: Application) {
                 .withLog("🏷 ${me.name} is now known as ${me.name} $title")
         }
         broadcast()
+    }
+
+    /** Drop an item from your bag (host applies; clients ask the host). */
+    fun dropItem(name: String) {
+        if (role.value == Role.HOST) state.update { s ->
+            val me = s.players[selfId] ?: return@update s
+            s.copy(players = s.players + (me.id to me.copy(items = me.items.filterNot { it.name == name }))).withLog("🗑 ${me.name} drops $name")
+        }.also { broadcast() }
     }
 
     /** Host, after a kill at L4+: bind the fallen monster as a companion. */
