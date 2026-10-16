@@ -24,7 +24,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
-data class SpawnedMonster(val name: String, val hp: Int, val attacks: List<String>, val weakness: String, val flavor: String, val emoji: String, val accessories: List<String>, val taunt: String)
+data class SpawnedMonster(val name: String, val hp: Int, val attacks: List<String>, val weakness: String, val flavor: String, val emoji: String, val accessories: List<String>, val taunt: String, val voice: String = "")
 data class Resolved(val damageToMonster: Int, val damageToPlayer: Int, val narration: String, val style: Int, val taunt: String, val drankPotion: Boolean = false, val usedItem: String? = null)
 data class Loot(val name: String, val effect: String)
 data class OmenText(val name: String, val lore: String, val threat: Int)
@@ -227,7 +227,8 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
 
     private val lenientJson = Json { ignoreUnknownKeys = true; isLenient = true; coerceInputValues = true }
 
-    @Serializable private data class MonsterJson(val name: String = "", val hp: Int = 30, val attacks: String = "", val weakness: String = "", val flavor: String = "", val emoji: String = "👾", val accessories: String = "", val taunt: String = "")
+    @Serializable private data class MonsterJson(val name: String = "", val hp: Int = 30, val attacks: String = "", val weakness: String = "", val flavor: String = "", val emoji: String = "👾", val accessories: String = "", val taunt: String = "", val voice: String = "")
+    @Serializable private data class DungeonJson(val name: String = "", val motto: String = "")
     @Serializable private data class NpcJson(val name: String = "", val role: String = "oddball", val emoji: String = "🙂", val accessories: String = "", val greeting: String = "", val offer: String = "")
 
     /**
@@ -286,7 +287,7 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
             if (environment.isNotBlank()) append("Conditions: $environment. Let that shape the monster. ")
             if (reputation.isNotBlank()) append("The players are known as: $reputation; the monster has heard of them. ")
             if (bossLair != null) append("IMPORTANT: this place is the lair of $bossLair. The monster is its champion or the entity itself: make it a BOSS, hp 60 to 80, more menacing than usual. ")
-            append("Answer as compact JSON: name (short dramatic, from the object), hp (20-60, bigger objects higher), attacks (exactly 2 names, comma separated), weakness (one short phrase players could plausibly act on), flavor (one vivid sentence, under 20 words), emoji (one), accessories (exactly 2 emoji separated by a space: eyes and a weapon), taunt (what it shouts, ALL CAPS, under 8 words).")
+            append("Answer as compact JSON: name (short dramatic, from the object), hp (20-60, bigger objects higher), attacks (exactly 2 names, comma separated), weakness (one short phrase players could plausibly act on), flavor (one vivid sentence, under 20 words), emoji (one), accessories (exactly 2 emoji separated by a space: eyes and a weapon), taunt (what it shouts, ALL CAPS, under 8 words), voice (how it talks, under 8 words, e.g. 'hisses in the third person').")
         }
         val t0 = System.currentTimeMillis()
         var line = ""
@@ -295,7 +296,7 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
             val raw = c.sendMessage(Contents.of(Content.ImageFile(imagePath), Content.Text(prompt)), responseFormat = ResponseFormat.json(MONSTER_SCHEMA)).plainText()
             Log.i(TAG, "spawn json in ${System.currentTimeMillis() - t0} ms: ${raw.take(200).replace("\n", " ")}")
             val j = lenientJson.decodeFromString(MonsterJson.serializer(), extractJson(raw))
-            if (j.name.isBlank()) null else SpawnedMonster(j.name.take(40), j.hp.coerceIn(10, 80), splitList(j.attacks).ifEmpty { listOf("Lunge") }, j.weakness.ifBlank { "a clever idea" }, j.flavor, j.emoji.take(4).ifBlank { "👾" }, splitEmoji(j.accessories), j.taunt.take(60))
+            if (j.name.isBlank()) null else SpawnedMonster(j.name.take(40), j.hp.coerceIn(10, 80), splitList(j.attacks).ifEmpty { listOf("Lunge") }, j.weakness.ifBlank { "a clever idea" }, j.flavor, j.emoji.take(4).ifBlank { "👾" }, splitEmoji(j.accessories), j.taunt.take(60), j.voice.take(60))
         }.onFailure { Log.w(TAG, "spawn json failed: ${it.message?.take(160)}") }.getOrNull()
         var result = viaJson
         if (result == null) {
@@ -311,7 +312,7 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
 
     /** Start the battle conversation for a sheet (fresh, with tools, the monster in the system instruction). */
     suspend fun beginBattle(m: SpawnedMonster, ambush: Boolean) = lock.withLock { withContext(Dispatchers.IO) {
-        newConversation(" The current monster is ${m.name} (HP ${m.hp}; attacks: ${m.attacks.joinToString()}; weak to ${m.weakness}). ${m.flavor}" + if (ambush) " It ambushed the players who walked past it earlier." else "")
+        newConversation(" The current monster is ${m.name} (HP ${m.hp}; attacks: ${m.attacks.joinToString()}; weak to ${m.weakness}). ${m.flavor}" + (if (m.voice.isNotBlank()) " It talks like this: ${m.voice}; every taunt must sound like that and react to what the player just did." else "") + (if (ambush) " It ambushed the players who walked past it earlier." else ""))
     } }
 
     /** Photo -> monster, ready to fight. */
@@ -391,9 +392,38 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
             if (tools.npc == null) { retries++; reply = send(Contents.of("You must call the spawn_npc tool for the object in the photo now.")) }
             result = tools.npc; line = reply.plainText()
         }
-        if (result != null && viaJson == null) newConversation(" You are now ${result.name}, the ${result.role}: ${result.offer}. Stay in character.")
+        if (result != null) newConversation(npcPersona(result))
         Log.i(TAG, "meet took ${System.currentTimeMillis() - t0} ms; ok=${result != null}; json=${viaJson != null}")
         result to line
+    } }
+
+    fun npcPersona(n: SpawnedNpc): String {
+        val style = when (n.role) {
+            "merchant" -> "greedy and flattering; everything is a sales pitch, you count coins out loud, you never give anything away"
+            "sage" -> "cryptic and ancient; you speak in riddles but always hide one genuinely useful tip about monsters' weaknesses in your words"
+            "healer" -> "warm and fussy; you scold about wounds, you heal when asked, you remember everyone's name"
+            else -> "an oddball obsessed with one strange topic that you steer every answer back to"
+        }
+        return " You are now ${n.name}, the ${n.role}: ${n.offer}. You are $style. Stay in character, under 40 words."
+    }
+
+    /** Name this raid's dungeon from the room, the omens and the party's reputation. Throwaway structured call. */
+    suspend fun dungeonName(environment: String, omens: String, reputation: String): Pair<String, String>? = lock.withLock { withContext(Dispatchers.IO) {
+        runCatching {
+            val c = engine!!.createConversation(ConversationConfig(systemInstruction = Contents.of(SYSTEM_PROMPT), samplerConfig = SamplerConfig(topK = 40, topP = 0.95, temperature = 1.0), thinkingConfig = ThinkingConfig(false, 0), maxOutputToken = 80, enableResponseFormat = true))
+            try {
+                val prompt = buildString {
+                    append("Name the dungeon the players have just entered. It is really an ordinary place (an office, a home, a park) seen as a dungeon. ")
+                    if (environment.isNotBlank()) append("Conditions: $environment. ")
+                    if (omens.isNotBlank()) append("Nearby spirits: $omens. ")
+                    if (reputation.isNotBlank()) append("The party is known as $reputation. ")
+                    append("Answer as JSON: name (4-6 words, grand and funny, e.g. 'The Fluorescent Catacombs of Draper'), motto (under 10 words).")
+                }
+                val raw = c.sendMessage(Contents.of(prompt), responseFormat = ResponseFormat.json(DUNGEON_SCHEMA)).plainText()
+                val j = lenientJson.decodeFromString(DungeonJson.serializer(), extractJson(raw))
+                if (j.name.isBlank()) null else j.name.take(60) to j.motto.take(80)
+            } finally { c.close() }
+        }.getOrNull()
     } }
 
     /** Chat with the current NPC (continues the conversation started by meet). */
@@ -412,9 +442,9 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
     } }
 
     /** Free-form talk with the dungeon master while exploring. */
-    suspend fun dmChat(playerName: String, text: String?, audioWav: ByteArray?, summary: String): Pair<String, Boolean> = lock.withLock { withContext(Dispatchers.IO) {
+    suspend fun dmChat(playerName: String, text: String?, audioWav: ByteArray?, summary: String, world: String = ""): Pair<String, Boolean> = lock.withLock { withContext(Dispatchers.IO) {
         tools.potionRequested = false
-        if (conversation == null || turns >= MAX_TURNS_PER_CONVERSATION) newConversation(" The party is exploring between fights. Answer as the dungeon master: lore, tips, banter. Under 40 words.")
+        if (conversation == null || turns >= MAX_TURNS_PER_CONVERSATION) newConversation(" The party is exploring between fights. Answer as the dungeon master: lore, tips, banter. Under 40 words.$world")
         val situation = buildString {
             append("Party status: $summary. ")
             if (audioWav != null) append("$playerName speaks to you in the attached audio.") else append("$playerName says: \"$text\"")
@@ -486,7 +516,8 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
     companion object {
         private const val TAG = "Gemma"
         private const val MAX_TURNS_PER_CONVERSATION = 8
-        const val MONSTER_SCHEMA = """{"type":"object","properties":{"name":{"type":"string"},"hp":{"type":"integer"},"attacks":{"type":"string"},"weakness":{"type":"string"},"flavor":{"type":"string"},"emoji":{"type":"string"},"accessories":{"type":"string"},"taunt":{"type":"string"}},"required":["name","hp","attacks","weakness","flavor","emoji","accessories","taunt"]}"""
+        const val MONSTER_SCHEMA = """{"type":"object","properties":{"name":{"type":"string"},"hp":{"type":"integer"},"attacks":{"type":"string"},"weakness":{"type":"string"},"flavor":{"type":"string"},"emoji":{"type":"string"},"accessories":{"type":"string"},"taunt":{"type":"string"},"voice":{"type":"string"}},"required":["name","hp","attacks","weakness","flavor","emoji","accessories","taunt","voice"]}"""
+        const val DUNGEON_SCHEMA = """{"type":"object","properties":{"name":{"type":"string"},"motto":{"type":"string"}},"required":["name","motto"]}"""
         const val NPC_SCHEMA = """{"type":"object","properties":{"name":{"type":"string"},"role":{"type":"string"},"emoji":{"type":"string"},"accessories":{"type":"string"},"greeting":{"type":"string"},"offer":{"type":"string"}},"required":["name","role","emoji","accessories","greeting","offer"]}"""
         const val SYSTEM_PROMPT = """You are the dungeon master of a co-op augmented-reality RPG played in a real room.
 Real objects seen through the phone camera become monsters. Be vivid, funny and fast. Keep every reply under 40 words.

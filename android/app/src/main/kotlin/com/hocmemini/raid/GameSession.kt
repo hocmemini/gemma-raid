@@ -284,6 +284,18 @@ class GameSession(private val app: Application) {
         broadcast()
         sfx.loop("ambient_explore")
         startScout()
+        nameTheDungeon()
+    }
+
+    /** One structured call when the raid opens: the DM names the place. Runs when the engine is free. */
+    private fun nameTheDungeon() = scope.launch {
+        val g = gemma ?: return@launch
+        delay(1500)
+        val r = runCatching { g.dungeonName(env.describe(), state.value.omens.take(3).joinToString { it.name }, reputation()) }.getOrNull() ?: return@launch
+        val (name, motto) = r
+        journalMark("🏰 $name")
+        state.update { it.copy(dungeon = name, fx = Fx(nextSeq(it), label = "dungeon", say = "Welcome to $name. $motto")).withLog("🏰 You have entered $name. \"$motto\"") }
+        broadcast()
     }
 
     fun join(name: String) {
@@ -593,6 +605,7 @@ class GameSession(private val app: Application) {
             "stir" -> sfx.play("omen", volume = 0.35f, rate = 1.6f)
             "flee" -> { sfx.play("whoosh"); sfx.play("steps", 150) }
             "quest" -> { sfx.play("coins"); sfx.play("levelup", 300, 0.7f); sfx.narrate("Quest complete: ${f.say}", 500) }
+            "dungeon" -> { sfx.play("omen", volume = 0.6f); sfx.narrate(f.say, 400) }
             "bind" -> { sfx.play("npc"); sfx.speak(f.taunt, pitch, 1.0f, 300) }
             else -> {
                 if (f.power.isNotBlank()) sfx.play("legendary", 0, 0.6f, 1.2f)
@@ -838,7 +851,12 @@ class GameSession(private val app: Application) {
         if (state.value.busy) return
         state.update { it.copy(busy = true).withLog("${p.name}: ${text ?: "🎤 (asks the DM)"}") }; broadcast()
         val summary = state.value.players.values.joinToString("; ") { "${it.name} L${it.level} ${it.hp}/${it.maxHp} HP, ${it.potions} potions, items: ${it.items.ifEmpty { listOf(Item("none")) }.joinToString()}" } + "; kills ${state.value.kills}"
-        val (reply0, potion) = runCatching { g.dmChat(p.name, text, audioWav, summary) }.getOrElse { "" to false }
+        val world = buildString {
+            if (state.value.dungeon.isNotBlank()) append(" The dungeon is called ${state.value.dungeon}.")
+            val qs = state.value.quests.filter { !it.done }
+            if (qs.isNotEmpty()) append(" Active quests: ${qs.joinToString("; ") { "${it.title} (${it.progress}/${it.target})" }}. When asked for tips, point at these.")
+        }
+        val (reply0, potion) = runCatching { g.dmChat(p.name, text, audioWav, summary, world) }.getOrElse { "" to false }
         val reply = reply0.clean()
         state.update { s ->
             var me = s.players[p.id] ?: p

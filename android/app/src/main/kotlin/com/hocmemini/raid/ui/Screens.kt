@@ -336,6 +336,7 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit, onMo
                     if (state.phase == Phase.EXPLORE && isHost && steps > 0) add("👣 $steps")
                     if (state.lurking > 0 && state.phase == Phase.EXPLORE) add("👁 ${state.lurking} lurking")
                     state.quests.firstOrNull { !it.done }?.let { add("📜 ${it.title} (${it.progress}/${it.target})") }
+                    if (state.dungeon.isNotBlank() && state.phase == Phase.EXPLORE) add("🏰 ${state.dungeon}")
                 }
                 if (chips.isNotEmpty()) Text(chips.joinToString(" · "), color = Color.White.copy(alpha = 0.9f), fontSize = 12.sp,
                     modifier = Modifier.background(Color.Black.copy(alpha = 0.4f), RoundedCornerShape(6.dp)).padding(4.dp))
@@ -834,6 +835,7 @@ private fun Splashes(vm: GameSession, state: com.hocmemini.raid.game.GameState, 
             Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(24.dp).graphicsLayer { scaleX = scale.value; scaleY = scale.value }) {
                 Text(if (state.ambush) "⚡ AMBUSH" else if (m.name.startsWith("👑")) "A BOSS APPEARS" else "A FOE APPEARS", color = Dungeon.ember, style = MaterialTheme.typography.titleMedium, letterSpacing = 3.sp)
                 if (state.ambush) Text("it followed you from back there", color = Dungeon.parchment.copy(alpha = 0.7f), fontSize = 12.sp)
+                else if (state.dungeon.isNotBlank()) Text(state.dungeon, color = Dungeon.parchment.copy(alpha = 0.7f), fontSize = 12.sp)
                 if (sprite != null) Image(sprite, m.name, Modifier.size(240.dp), contentScale = ContentScale.Fit) else Text(m.emoji, fontSize = 140.sp)
                 Text(m.name, color = Dungeon.gold, style = MaterialTheme.typography.displayLarge, fontSize = 34.sp, textAlign = TextAlign.Center)
                 Text(m.flavor, color = Dungeon.parchment, textAlign = TextAlign.Center, fontSize = 15.sp)
