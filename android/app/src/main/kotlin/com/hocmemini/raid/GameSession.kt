@@ -1035,7 +1035,13 @@ class GameSession(private val app: Application) {
         }
 
         // ---- powers (level-gated verbs) ----
-        val invoked = g.lastPower
+        // A power named in typed/chip text counts even if the model forgot use_power (voice still relies on the model).
+        val typedPower: Pair<String, String>? = text?.let { t ->
+            listOf("Taunt", "Parley", "Bind", "Recast").firstOrNull { Regex("\\b${it}\\b", RegexOption.IGNORE_CASE).containsMatchIn(t) }?.let { pw ->
+                pw to (if (pw == "Recast") t.substringAfter("to", "").substringAfter("weakness", "").trim().trim('.', '!').take(40) else "")
+            }
+        }
+        val invoked = g.lastPower ?: typedPower
         val power = invoked?.takeIf { it.first in powersFor(p.level) }
         var powerLog = ""
         if (invoked != null && power == null) {

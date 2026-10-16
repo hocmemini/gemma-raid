@@ -422,7 +422,7 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit, onMo
                 val chips = when (state.phase) {
                     Phase.NPC -> listOf("What's for sale?", "Heal me", "Tell me a secret", "Anything for free?")
                     Phase.EXPLORE -> listOf("Any tips?", "What is this place?", "Who are you?")
-                    else -> (if (isHost) listOf("🏃 Run!") else emptyList()) + powersFor(self?.level ?: 1).map { if (it == "Recast") "I recast its weakness to…" else "I $it it!" }
+                    else -> (if (isHost) listOf("🏃 Run!") else emptyList()) + powersFor(self?.level ?: 1).map { when (it) { "Recast" -> "I Recast its weakness to…"; "Parley" -> "I Parley: hear me out!"; "Bind" -> "I Bind it!"; else -> "I Taunt it: come at me!" } }
                 }
                 if (chips.isNotEmpty() && !state.busy) {
                     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
