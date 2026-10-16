@@ -46,7 +46,7 @@ class Sfx(context: Context) {
                 Log.i("Sfx", "voices: " + ranked.joinToString { "${it.name}(q${it.quality}${if (it.isNetworkConnectionRequired) ",net" else ""})" })
                 // Google's newer local voices carry "x-..." ids; prefer distinct ones so the three characters differ.
                 val us = ranked.filter { it.locale.country == "US" }.ifEmpty { ranked }
-                voiceDm = us.getOrNull(0)
+                voiceDm = us.firstOrNull { it.name.contains("-x-") && (it.name.contains("tpc", true) || it.name.contains("sfg", true) || it.name.contains("tpf", true)) } ?: us.firstOrNull { it.name.contains("-x-") } ?: us.getOrNull(0)
                 voiceMonster = us.firstOrNull { it.name.contains("iom", true) || it.name.contains("iog", true) || it.name.contains("tpd", true) } ?: us.getOrNull(1) ?: voiceDm
                 voiceNpc = us.firstOrNull { it != voiceDm && it != voiceMonster && (it.name.contains("iob", true) || it.name.contains("tpc", true) || it.name.contains("sfg", true)) } ?: us.getOrNull(2) ?: voiceDm
                 Log.i("Sfx", "picked dm=${voiceDm?.name} monster=${voiceMonster?.name} npc=${voiceNpc?.name}")

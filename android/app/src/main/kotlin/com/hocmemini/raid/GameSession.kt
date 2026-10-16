@@ -776,8 +776,13 @@ class GameSession(private val app: Application) {
         }
 
         // ---- powers (level-gated verbs) ----
-        val power = g.lastPower?.takeIf { it.first in powersFor(p.level) }
+        val invoked = g.lastPower
+        val power = invoked?.takeIf { it.first in powersFor(p.level) }
         var powerLog = ""
+        if (invoked != null && power == null) {
+            val needs = listOf("Taunt" to 2, "Parley" to 3, "Bind" to 4, "Recast" to 5).firstOrNull { it.first.equals(invoked.first, true) }?.second
+            powerLog = if (needs != null) "🔒 ${invoked.first} unlocks at level $needs — ${p.name} is level ${p.level}. It counts as a plain action for now." else "🔒 ${invoked.first}? No such power."
+        }
         var dazeNow = false
         var recastTo: String? = null
         var parleyWon = false
