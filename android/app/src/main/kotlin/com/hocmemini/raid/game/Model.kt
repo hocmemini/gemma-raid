@@ -47,6 +47,10 @@ data class GameState(
     val kills: Int = 0,
     /** Steps the host walked since the last fight; feeds monster size. */
     val steps: Int = 0,
+    /** Host's environment summary for the HUD, e.g. "🌑 dark · ⬇2 floors". */
+    val env: String = "",
+    /** Players with a parry armed (double twist). */
+    val parries: List<String> = emptyList(),
 ) {
     fun withLog(line: String): GameState = copy(log = (log + line).takeLast(40))
 }
@@ -63,6 +67,10 @@ sealed class Msg {
     /** Precedes a STREAM payload carrying a WAV clip of the player's spoken action. */
     @Serializable @SerialName("audio")
     data class AudioHeader(val playerId: String, val headingDeg: Float, val lat: Double, val lon: Double, val bytes: Int) : Msg()
+
+    /** The player twisted the phone: block the monster's next hit on them. */
+    @Serializable @SerialName("parry")
+    data class Parry(val playerId: String) : Msg()
 
     @Serializable @SerialName("pose")
     data class Pose(val playerId: String, val headingDeg: Float, val lat: Double, val lon: Double) : Msg()

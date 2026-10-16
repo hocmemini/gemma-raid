@@ -110,6 +110,7 @@ fun PlayScreen(vm: GameSession) {
     val heading by vm.compass.heading.collectAsState()
     val steps by vm.steps.sinceReset.collectAsState()
     val recording by vm.recording.collectAsState()
+    val envNow by vm.env.summary.collectAsState()
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
     var action by remember { mutableStateOf("") }
 
@@ -148,6 +149,9 @@ fun PlayScreen(vm: GameSession) {
                 buildString {
                     append("${heading.toInt()}° · ${if (isHost) "host" else "player"} · kills ${state.kills}")
                     if (state.phase == Phase.EXPLORE && isHost) append(" · $steps steps")
+                    val e = if (isHost) envNow else state.env
+                    if (e.isNotBlank()) append(" · $e")
+                    if (vm.selfId in state.parries) append(" · 🛡 guard up")
                     if (status.isNotBlank()) append(" · $status")
                 },
                 color = Color.White.copy(alpha = 0.85f), fontSize = 12.sp,
@@ -184,6 +188,7 @@ fun PlayScreen(vm: GameSession) {
                     ) {
                         Text(if (recording) "● listening… release to attack" else "🎤 hold to shout your move", color = Color.White, fontWeight = FontWeight.Bold)
                     }
+                    Text("or swing the phone to strike · double-twist to parry", color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp, modifier = Modifier.align(Alignment.CenterHorizontally))
                 }
                 else -> if (isHost) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

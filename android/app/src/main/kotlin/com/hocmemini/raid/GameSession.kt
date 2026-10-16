@@ -19,6 +19,10 @@ import com.hocmemini.raid.game.maxHpFor
 import com.hocmemini.raid.llm.Gemma
 import com.hocmemini.raid.net.NearbyLink
 import com.hocmemini.raid.sensors.Compass
+import com.hocmemini.raid.sensors.DoubleTwist
+import com.hocmemini.raid.sensors.Environment
+import com.hocmemini.raid.sensors.SwingDetector
+import com.hocmemini.raid.sensors.wavLoudness
 import com.hocmemini.raid.sensors.Locator
 import com.hocmemini.raid.sensors.StepCounter
 import com.hocmemini.raid.sensors.distanceMeters
@@ -63,6 +67,11 @@ class GameSession(private val app: Application) {
     val compass = Compass(app)
     val locator = Locator(app)
     val steps = StepCounter(app)
+    val env = Environment(app)
+    val lastSwing = MutableStateFlow(0f)
+    val lastEvent = MutableStateFlow("")
+    private val swing = SwingDetector(app) { peak -> onSwing(peak) }
+    private val twist = DoubleTwist(app) { onTwist() }
     private var link: NearbyLink? = null
     private var gemma: Gemma? = null
     private val recorder = Recorder()
@@ -74,8 +83,8 @@ class GameSession(private val app: Application) {
     val modelFile: File get() = File(app.filesDir, MODEL_NAME)
     val modelPresent = MutableStateFlow(modelFile.exists())
 
-    fun startSensors() { if (!sensorsRunning) { compass.start(); locator.start(); steps.start(); sensorsRunning = true } }
-    fun stopSensors() { if (sensorsRunning) { compass.stop(); locator.stop(); steps.stop(); sensorsRunning = false } }
+    fun startSensors() { if (!sensorsRunning) { compass.start(); locator.start(); steps.start(); env.start(); swing.start(); twist.start(); sensorsRunning = true } }
+    fun stopSensors() { if (sensorsRunning) { compass.stop(); locator.stop(); steps.stop(); env.stop(); swing.stop(); twist.stop(); sensorsRunning = false } }
 
     // ---------- model ----------
 
@@ -121,8 +130,38 @@ class GameSession(private val app: Application) {
         prefs.edit().putString("name", selfName).apply()
         role.value = Role.HOST
         link = NearbyLink(app, selfName, ::onMessage, ::onBinary, { peers.value = it }, { status.value = it }).also { it.host() }
-        steps.reset()
+        steps.reset(); env.markBaseline()
         state.update { it.copy(phase = Phase.EXPLORE, players = it.players + (selfId to selfPlayer())).withLog("$selfName opened the raid. Walk around, then point at something.") }
+        broadcast()
+    }
+
+    /** A vigorous swing = a melee attack without typing. Harder swings hit harder. */
+    private fun onSwing(peak: Float) {
+        val s = state.value
+        if (s.phase != Phase.BATTLE || s.busy || (s.players[selfId]?.hp ?: 0) <= 0) return
+        lastSwing.value = peak
+        buzz(30)
+        val text = when {
+            peak > 30f -> "I swing with everything I have, a wild all-out strike!"
+            peak > 22f -> "I swing hard at it!"
+            else -> "I take a swing at it."
+        }
+        act(text)
+    }
+
+    /** Double twist = parry: the monster's next hit on this player is blocked. */
+    private fun onTwist() {
+        val s = state.value
+        if (s.phase != Phase.BATTLE) return
+        buzz(20, 40, 20)
+        if (role.value == Role.HOST) armParry(selfId) else link?.send(Msg.Parry(selfId))
+    }
+
+    private fun armParry(playerId: String) {
+        state.update { s ->
+            if (playerId in s.parries) s
+            else s.copy(parries = s.parries + playerId).withLog("🛡 ${s.players[playerId]?.name ?: "?"} twists into a guard stance — next hit is parried")
+        }
         broadcast()
     }
 
@@ -164,6 +203,7 @@ class GameSession(private val app: Application) {
                 scope.launch { resolve(msg.playerId, msg.text, null, msg.headingDeg, msg.lat, msg.lon) }
             }
             is Msg.AudioHeader -> if (role.value == Role.HOST) pendingAudio[endpointId] = msg
+            is Msg.Parry -> if (role.value == Role.HOST) armParry(msg.playerId)
             is Msg.State -> if (role.value == Role.CLIENT) {
                 val before = state.value.players[selfId]?.hp
                 state.value = msg.state
@@ -194,7 +234,8 @@ class GameSession(private val app: Application) {
             .getOrElse { state.update { s -> s.copy(busy = false).withLog("camera failed: ${it.message}") }; broadcast(); return@launch }
         val bearing = compass.heading.value
         val loc = locator.location.value
-        val (spawned, text) = runCatching { g.spawn(path, walked) }
+        val conditions = env.describe()
+        val (spawned, text) = runCatching { g.spawn(path, walked, conditions) }
             .getOrElse { state.update { s -> s.copy(busy = false).withLog("Gemma error: ${it.message}") }; broadcast(); return@launch }
         if (spawned == null) {
             state.update { it.copy(busy = false).withLog("The DM hesitates: ${text.take(200)}") }
@@ -205,8 +246,9 @@ class GameSession(private val app: Application) {
             val m = Monster(spawned.name, hp, hp, spawned.attacks, spawned.weakness, spawned.flavor, bearing, loc?.latitude ?: 0.0, loc?.longitude ?: 0.0, spawned.emoji)
             steps.reset()
             state.update {
-                var s = it.copy(phase = Phase.BATTLE, monster = m, busy = false, turn = 0, steps = 0)
+                var s = it.copy(phase = Phase.BATTLE, monster = m, busy = false, turn = 0, steps = 0, env = env.summary.value, parries = emptyList())
                     .withLog("${m.emoji} ${m.name} appears! ${m.flavor}")
+                if (conditions.isNotBlank()) s = s.withLog("(${conditions.replaceFirstChar { c -> c.uppercase() }}.)")
                 if (bonus > 0) s = s.withLog("It grew +$bonus HP from the $walked steps you walked.")
                 if (text.isNotBlank()) s = s.withLog(text.take(200))
                 s
@@ -260,22 +302,28 @@ class GameSession(private val app: Application) {
         var dmg = r.damageToMonster
         if (!facing) dmg /= 2
         if (flanking) dmg = (dmg * 1.5f).roundToInt()
+        val cry = if (audioWav != null) (wavLoudness(audioWav) * 5f).roundToInt() else 0
+        if (dmg > 0) dmg += cry
+        val parried = playerId in s0.parries
+        val hurt = if (parried) 0 else r.damageToPlayer
         val newMonsterHp = (m.hp - dmg).coerceAtLeast(0)
-        val newPlayerHp = (p.hp - r.damageToPlayer).coerceAtLeast(0)
+        val newPlayerHp = (p.hp - hurt).coerceAtLeast(0)
         val killed = newMonsterHp == 0
         val xpGain = (if (dmg > 0) 10 else 0) + (if (killed) 50 else 0)
         val tag = buildString {
             append("−$dmg ${m.name}")
             if (flanking) append(" (flank!)")
             if (!facing) append(" (not facing it)")
-            if (r.damageToPlayer > 0) append(", −${r.damageToPlayer} ${p.name}")
+            if (cry > 0) append(" (battle cry +$cry)")
+            if (parried && r.damageToPlayer > 0) append(", 🛡 parried ${r.damageToPlayer}")
+            else if (hurt > 0) append(", −$hurt ${p.name}")
             if (xpGain > 0) append(", +$xpGain xp")
         }
-        if (playerId == selfId && r.damageToPlayer > 0) buzz(120)
+        if (playerId == selfId && hurt > 0) buzz(120)
         state.update { s ->
             var me = p.copy(hp = newPlayerHp, xp = p.xp + xpGain)
             val newLevel = levelFor(me.xp)
-            var next = s.copy(busy = false, turn = s.turn + 1, monster = m.copy(hp = newMonsterHp)).withLog(r.narration).withLog(tag)
+            var next = s.copy(busy = false, turn = s.turn + 1, monster = m.copy(hp = newMonsterHp), parries = s.parries - playerId).withLog(r.narration).withLog(tag)
             if (newLevel > me.level) {
                 me = me.copy(level = newLevel, maxHp = maxHpFor(newLevel), hp = maxHpFor(newLevel))
                 next = next.withLog("⬆ ${me.name} reached level $newLevel! Max HP ${me.maxHp}, fully healed.")

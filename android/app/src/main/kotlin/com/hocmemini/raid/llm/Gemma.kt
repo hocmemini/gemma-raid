@@ -123,12 +123,13 @@ class Gemma(private val modelPath: String, private val useGpu: Boolean) {
     }
 
     /** Photo of a real object -> monster via the spawn_monster tool. Starts a fresh conversation. */
-    suspend fun spawn(imagePath: String, stepsWalked: Int): Pair<SpawnedMonster?, String> = withContext(Dispatchers.IO) {
+    suspend fun spawn(imagePath: String, stepsWalked: Int, environment: String): Pair<SpawnedMonster?, String> = withContext(Dispatchers.IO) {
         tools.spawned = null
         newConversation()
         val prompt = buildString {
             append(SPAWN_PROMPT)
             if (stepsWalked > 30) append(" The players walked $stepsWalked steps to find it, so make it bigger and nastier than usual.")
+            if (environment.isNotBlank()) append(" Conditions: $environment. Let that shape the monster.")
         }
         val t0 = System.currentTimeMillis()
         var reply = send(Contents.of(Content.ImageFile(imagePath), Content.Text(prompt)))
