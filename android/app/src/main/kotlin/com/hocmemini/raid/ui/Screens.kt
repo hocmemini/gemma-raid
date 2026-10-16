@@ -30,6 +30,17 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.ui.text.style.TextAlign
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.ui.platform.LocalContext
+import java.io.File
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlinx.coroutines.launch
@@ -172,12 +183,32 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit) {
     val self = state.players[vm.selfId]
     val monster = state.monster
     val isHost = role == GameSession.Role.HOST
+    val spriteVersion by vm.spriteVersion.collectAsState()
+
+    // Host: a monster you turn your back on for 4 s comes around to face you.
+    if (isHost) {
+        LaunchedEffect(state.phase, monster?.bearingDeg) {
+            if (state.phase != Phase.BATTLE || monster == null) return@LaunchedEffect
+            var awaySince = 0L
+            while (true) {
+                delay(500)
+                val d = abs(headingDelta(vm.compass.heading.value, vm.bearingToMonster(monster, vm.state.value.players[vm.selfId])))
+                val now = System.currentTimeMillis()
+                if (d > 60f) { if (awaySince == 0L) awaySince = now; if (now - awaySince > 4000 && !vm.state.value.busy) { vm.reanchorMonster(chase = true); return@LaunchedEffect } }
+                else awaySince = 0L
+            }
+        }
+    }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         CameraPreview(Modifier.fillMaxSize()) { imageCapture = it }
+        // long-press anywhere: re-pin the monster to where you're looking (compass drift fix)
+        if (isHost && state.phase == Phase.BATTLE) {
+            Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures(onLongPress = { vm.reanchorMonster(chase = false) }) })
+        }
 
         if (monster != null && state.phase == Phase.BATTLE) {
-            MonsterOverlay(monster, delta = headingDelta(heading, vm.bearingToMonster(monster, self)), fx = state.fx)
+            MonsterOverlay(monster, delta = headingDelta(heading, vm.bearingToMonster(monster, self)), fx = state.fx, spriteVersion = spriteVersion)
         }
         FxLayer(state.fx, vm.selfId)
 
@@ -256,7 +287,7 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit) {
                     ) {
                         Text(if (recording) "● listening… release to attack" else "🎤 hold to shout your move", color = Color.White, fontWeight = FontWeight.Bold)
                     }
-                    Text("or swing the phone to strike · double-twist to parry", color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp, modifier = Modifier.align(Alignment.CenterHorizontally))
+                    Text(if (isHost) "swing to strike · double-twist to parry · long-press to re-pin" else "swing to strike · double-twist to parry", color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp, modifier = Modifier.align(Alignment.CenterHorizontally))
                 }
                 else -> if (isHost) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -292,22 +323,30 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit) {
 }
 
 /**
- * Heading-locked augmentation: a lock-on ring around the real object (centre of the frame at the spawn bearing),
- * Gemma's emoji features pinned around it, a weapon that swings at you, and a comic speech bubble for taunts.
- * The object itself stays visible; nothing opaque sits on it.
+ * Heading-locked augmentation. The photographed object, cut out by on-device segmentation, becomes the
+ * monster: it dances in a lock-on ring, sidesteps when you miss, flies at the screen with perspective
+ * when it strikes, and bursts when slain. Gemma's emoji features orbit it; taunts pop in a speech bubble.
  */
 @Composable
-private fun MonsterOverlay(m: Monster, delta: Float, fx: Fx?) {
+private fun MonsterOverlay(m: Monster, delta: Float, fx: Fx?, spriteVersion: Int) {
+    val context = LocalContext.current
+    val sprite: ImageBitmap? = remember(m.sprite, spriteVersion) {
+        if (m.sprite.isBlank()) null
+        else runCatching { BitmapFactory.decodeFile(File(context.cacheDir, m.sprite).absolutePath)?.asImageBitmap() }.getOrNull()
+    }
+    val dance by rememberInfiniteTransition(label = "dance").animateFloat(
+        0f, 1f, infiniteRepeatable(tween(1100, easing = LinearEasing)), label = "d",
+    )
     val pulse by rememberInfiniteTransition(label = "pulse").animateFloat(
         0f, 1f, infiniteRepeatable(tween(1400, easing = LinearEasing)), label = "p",
     )
-    val wobble by rememberInfiniteTransition(label = "wobble").animateFloat(
-        -1f, 1f, infiniteRepeatable(tween(700, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "w",
-    )
     val shakeX = remember { Animatable(0f) }
-    val hitRing = remember { Animatable(0f) }      // white ring flash on hit
-    val weapon = remember { Animatable(0f) }       // 0 = resting, 1 = thrust at the player
-    val death = remember { Animatable(0f) }        // 0 = alive, 1 = gone
+    val hitFlash = remember { Animatable(0f) }
+    val squash = remember { Animatable(0f) }       // 1 = squashed (hit)
+    val fly = remember { Animatable(0f) }          // 0 = home, 1 = in your face
+    val dodge = remember { Animatable(0f) }        // -1..1 sidestep
+    val hop = remember { Animatable(0f) }
+    val death = remember { Animatable(0f) }
     val bubble = remember { Animatable(0f) }
     var bubbleText by remember { mutableStateOf("") }
 
@@ -315,22 +354,34 @@ private fun MonsterOverlay(m: Monster, delta: Float, fx: Fx?) {
         val f = fx ?: return@LaunchedEffect
         if (f.taunt.isNotBlank()) {
             bubbleText = f.taunt
+            launch { hop.animateTo(1f, tween(140)); hop.animateTo(0f, spring(dampingRatio = Spring.DampingRatioMediumBouncy)) }
             launch {
                 bubble.snapTo(0f); bubble.animateTo(1f, spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium))
                 kotlinx.coroutines.delay(4500); bubble.animateTo(0f, tween(300))
             }
         }
-        if (f.label == "spawn") { death.snapTo(1f); death.animateTo(0f, tween(600)); return@LaunchedEffect }
+        if (f.label == "spawn") { death.snapTo(1f); death.animateTo(0f, tween(650)); return@LaunchedEffect }
+        if (f.label == "chase") {
+            fly.snapTo(0.5f); fly.animateTo(0f, spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow)); return@LaunchedEffect
+        }
         if (f.dealt > 0) {
-            launch { hitRing.snapTo(1f); hitRing.animateTo(0f, tween(450)) }
+            launch { hitFlash.snapTo(1f); hitFlash.animateTo(0f, tween(420)) }
+            launch { squash.animateTo(1f, tween(90)); squash.animateTo(0f, spring(dampingRatio = Spring.DampingRatioHighBouncy)) }
             repeat(4) { shakeX.animateTo(if (it % 2 == 0) 26f else -26f, tween(45)) }
             shakeX.animateTo(0f, tween(45))
+        } else if (f.playerId.isNotBlank() && f.potion == 0 && !f.killed) {
+            // a miss: it sidesteps
+            val side = if (f.seq % 2 == 0) 1f else -1f
+            dodge.animateTo(side, tween(150, easing = FastOutLinearInEasing))
+            kotlinx.coroutines.delay(120)
+            dodge.animateTo(0f, spring(dampingRatio = Spring.DampingRatioMediumBouncy))
         }
-        if (f.killed) { death.animateTo(1f, tween(700)); return@LaunchedEffect }
+        if (f.killed) { death.animateTo(1f, tween(750)); return@LaunchedEffect }
         if (f.taken > 0 || f.parried) {
-            weapon.animateTo(1f, tween(230, easing = FastOutLinearInEasing))
-            kotlinx.coroutines.delay(150)
-            weapon.animateTo(0f, spring(dampingRatio = Spring.DampingRatioMediumBouncy))
+            // perspective strike: accelerate into the screen, hold, snap back
+            fly.animateTo(1f, tween(400, easing = CubicBezierEasing(0.75f, 0f, 1f, 1f)))
+            kotlinx.coroutines.delay(140)
+            fly.animateTo(0f, spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow))
         }
     }
 
@@ -338,61 +389,85 @@ private fun MonsterOverlay(m: Monster, delta: Float, fx: Fx?) {
         val halfW = maxWidth / 2
         val ringDp = maxWidth * 0.46f
         val density = LocalDensity.current
+        val ringPx = with(density) { ringDp.toPx() }
+        val screenHpx = with(density) { maxHeight.toPx() }
         if (abs(delta) <= 45f) {
             val xOff = halfW * (delta / 45f)
-            // ring + features, centred on the object
+            // lock-on ring + orbiting features (stay put while the sprite flies)
             Box(
                 Modifier.align(Alignment.Center).offset(x = xOff).size(ringDp * 1.9f).graphicsLayer {
                     translationX = shakeX.value
-                    alpha = 1f - death.value
+                    alpha = (1f - death.value) * (1f - fly.value * 0.7f)
                     scaleX = 1f + death.value * 0.8f; scaleY = 1f + death.value * 0.8f
                 },
                 contentAlignment = Alignment.Center,
             ) {
                 Canvas(Modifier.size(ringDp)) {
                     val r = size.minDimension / 2
-                    // lock-on ring: dashed, rotating, red-orange
                     drawCircle(
                         color = Color(0xFFFF5252).copy(alpha = 0.9f), radius = r * 0.98f,
                         style = Stroke(width = 6f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(40f, 24f), phase = pulse * 64f)),
                     )
-                    // corner ticks
                     val t = r * 0.18f
                     listOf(-1f to -1f, 1f to -1f, -1f to 1f, 1f to 1f).forEach { (sx, sy) ->
                         val cx = center.x + sx * r * 1.08f; val cy = center.y + sy * r * 1.08f
                         drawLine(Color.White, Offset(cx, cy), Offset(cx - sx * t, cy), strokeWidth = 5f)
                         drawLine(Color.White, Offset(cx, cy), Offset(cx, cy - sy * t), strokeWidth = 5f)
                     }
-                    // hit flash ring
-                    if (hitRing.value > 0f) drawCircle(Color.White.copy(alpha = hitRing.value), radius = r * (1.0f + (1f - hitRing.value) * 0.4f), style = Stroke(width = 14f * hitRing.value + 2f))
-                    // pulse ripple
+                    if (hitFlash.value > 0f) drawCircle(Color.White.copy(alpha = hitFlash.value), radius = r * (1.0f + (1f - hitFlash.value) * 0.4f), style = Stroke(width = 14f * hitFlash.value + 2f))
                     drawCircle(Color(0xFFFF5252).copy(alpha = (1f - pulse) * 0.5f), radius = r * (1f + pulse * 0.35f), style = Stroke(width = 3f))
                 }
-                // features pinned around the ring: eyes top, weapon right, third left
-                val feats = m.accessories.ifEmpty { listOf(m.emoji) }
-                val ringPx = with(density) { ringDp.toPx() }
+                val feats = m.accessories
+                val wob = sin(dance * 2f * Math.PI.toFloat())
                 feats.forEachIndexed { i, e ->
                     val ang = when (i) { 0 -> -90.0; 1 -> 20.0; else -> 200.0 }
                     val rad = Math.toRadians(ang)
                     val px = (cos(rad) * ringPx * 0.62f).toFloat()
                     val py = (sin(rad) * ringPx * 0.62f).toFloat()
-                    val isWeapon = i == 1 && feats.size > 1
-                    Text(
-                        e, fontSize = if (i == 0) 64.sp else 56.sp,
-                        modifier = Modifier.graphicsLayer {
-                            translationX = px + wobble * 6f * (i + 1)
-                            translationY = py + (if (isWeapon) weapon.value * ringPx * 0.9f else wobble * 5f)
-                            val sc = if (isWeapon) 1f + weapon.value * 1.6f else 1f
-                            scaleX = sc; scaleY = sc
-                            rotationZ = if (isWeapon) -25f + weapon.value * 60f else wobble * 8f
-                        },
-                    )
+                    Text(e, fontSize = if (i == 0) 60.sp else 52.sp, modifier = Modifier.graphicsLayer {
+                        translationX = px + wob * 6f * (i + 1); translationY = py + wob * 5f; rotationZ = wob * 8f
+                    })
                 }
-                if (death.value > 0.05f) Text("💥", fontSize = (40 + 100 * death.value).sp, modifier = Modifier.graphicsLayer { alpha = 1f - death.value })
             }
-            // compact name chip above the ring, so the object stays visible
+            // the object itself, as the monster
+            Box(
+                Modifier.align(Alignment.Center).offset(x = xOff).size(ringDp * 0.92f).graphicsLayer {
+                    val d = death.value
+                    val fl = fly.value
+                    val bob = sin(dance * 2f * Math.PI.toFloat())
+                    val wig = sin(dance * 4f * Math.PI.toFloat())
+                    val sq = squash.value
+                    val s = (1f + fl * 5.5f) * (1f - d)
+                    scaleX = s * (1f + 0.05f * wig + 0.25f * sq)
+                    scaleY = s * (1f - 0.05f * wig - 0.2f * sq)
+                    translationX = shakeX.value + dodge.value * ringPx * 0.7f
+                    translationY = bob * 10f - hop.value * 60f + fl * screenHpx * 0.22f + sq * 18f
+                    rotationZ = bob * 5f - dodge.value * 18f + d * 540f + fl * 4f
+                    rotationX = -fl * 22f
+                    cameraDistance = 10f * density.density
+                    alpha = 1f - d
+                    transformOrigin = TransformOrigin(0.5f, 0.5f)
+                },
+                contentAlignment = Alignment.Center,
+            ) {
+                if (sprite != null) {
+                    // ghost trail while flying
+                    if (fly.value > 0.1f) {
+                        Image(sprite, null, Modifier.fillMaxSize().graphicsLayer { scaleX = 0.8f; scaleY = 0.8f; alpha = 0.35f * fly.value }, contentScale = ContentScale.Fit)
+                        Image(sprite, null, Modifier.fillMaxSize().graphicsLayer { scaleX = 0.9f; scaleY = 0.9f; alpha = 0.5f * fly.value }, contentScale = ContentScale.Fit)
+                    }
+                    Image(
+                        sprite, contentDescription = m.name, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit,
+                        colorFilter = if (hitFlash.value > 0f) ColorFilter.tint(Color.White.copy(alpha = hitFlash.value * 0.9f), BlendMode.SrcAtop) else null,
+                    )
+                } else {
+                    Text(m.emoji, fontSize = 110.sp)
+                }
+                if (death.value > 0.05f && fx?.killed == true) Text("💥", fontSize = (40 + 100 * death.value).sp, modifier = Modifier.graphicsLayer { alpha = 1f - death.value })
+            }
+            // compact name chip above the ring
             Column(
-                Modifier.align(Alignment.Center).offset(x = xOff, y = -(ringDp * 0.78f)).graphicsLayer { alpha = 1f - death.value },
+                Modifier.align(Alignment.Center).offset(x = xOff, y = -(ringDp * 0.82f)).graphicsLayer { alpha = (1f - death.value) * (1f - fly.value) },
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Card { Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -405,7 +480,7 @@ private fun MonsterOverlay(m: Monster, delta: Float, fx: Fx?) {
             if (bubble.value > 0.01f && bubbleText.isNotBlank()) {
                 Box(
                     Modifier.align(Alignment.Center).offset(x = xOff + ringDp * 0.55f, y = -(ringDp * 0.45f))
-                        .graphicsLayer { scaleX = bubble.value; scaleY = bubble.value; transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 1f) },
+                        .graphicsLayer { scaleX = bubble.value; scaleY = bubble.value; transformOrigin = TransformOrigin(0f, 1f) },
                 ) {
                     SpeechBubble(bubbleText)
                 }

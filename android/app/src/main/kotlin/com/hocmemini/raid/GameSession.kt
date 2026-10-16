@@ -8,6 +8,7 @@ import android.os.VibratorManager
 import androidx.camera.core.ImageCapture
 import com.hocmemini.raid.audio.Recorder
 import com.hocmemini.raid.audio.Sfx
+import com.hocmemini.raid.camera.SpriteMaker
 import com.hocmemini.raid.camera.captureToFile
 import com.hocmemini.raid.game.Fx
 import com.hocmemini.raid.game.GameState
@@ -37,6 +38,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import java.io.File
 import java.util.UUID
@@ -93,6 +95,10 @@ class GameSession(private val app: Application) {
     private val vibrator = runCatching { app.getSystemService(VibratorManager::class.java)?.defaultVibrator }.getOrNull()
     /** Host: audio headers waiting for their STREAM payload, by endpoint. */
     private val pendingAudio = mutableMapOf<String, Msg.AudioHeader>()
+    /** Client: sprite header waiting for its STREAM payload. */
+    private var pendingSprite: Msg.SpriteHeader? = null
+    /** Bumped whenever a sprite file lands so the overlay reloads it. */
+    val spriteVersion = MutableStateFlow(0)
     private var sensorsRunning = false
 
     val modelFile: File get() = File(app.filesDir, MODEL_NAME)
@@ -262,6 +268,7 @@ class GameSession(private val app: Application) {
         when {
             f.label == "spawn" -> { sfx.play("spawn"); sfx.growl(f.taunt, 700) }
             f.label == "omens" -> sfx.play("omen")
+            f.label == "chase" -> { sfx.play("spawn", volume = 0.6f, rate = 1.3f); sfx.growl(f.taunt, 300) }
             else -> {
                 if (f.dealt > 0) { sfx.play("slash"); sfx.play("hit", 130) } else if (f.playerId.isNotBlank() && f.potion == 0) sfx.play("miss")
                 if (f.label == "LEGENDARY!") sfx.play("legendary", 200)
@@ -287,7 +294,7 @@ class GameSession(private val app: Application) {
 
     private fun selfPlayer(): Player {
         val loc = locator.location.value
-        return Player(selfId, selfName, headingDeg = compass.heading.value, lat = loc?.latitude ?: 0.0, lon = loc?.longitude ?: 0.0)
+        return Player(selfId, selfName, headingDeg = compass.heading.value, lat = loc?.latitude ?: 0.0, lon = loc?.longitude ?: 0.0, acc = loc?.accuracy ?: 999f)
     }
 
     fun sendPose() {
@@ -301,7 +308,9 @@ class GameSession(private val app: Application) {
             is Msg.Join -> if (role.value == Role.HOST) {
                 state.update { it.copy(players = it.players + (msg.player.id to msg.player)).withLog("${msg.player.name} joined the raid") }
                 broadcast()
+                state.value.monster?.sprite?.takeIf { it.isNotBlank() }?.let { sendSprite(it, listOf(endpointId)) }
             }
+            is Msg.SpriteHeader -> if (role.value == Role.CLIENT) pendingSprite = msg
             is Msg.Pose -> if (role.value == Role.HOST) {
                 state.update { s ->
                     val p = s.players[msg.playerId] ?: return@update s
@@ -325,8 +334,22 @@ class GameSession(private val app: Application) {
         }
     }
 
-    /** Host: a STREAM payload arrived — it is the WAV clip announced by the last AudioHeader from that endpoint. */
+    private fun sendSprite(name: String, to: Collection<String>? = null) {
+        val f = File(app.cacheDir, name)
+        if (!f.exists()) return
+        val bytes = f.readBytes()
+        if (to == null) { link?.send(Msg.SpriteHeader(name, bytes.size)); link?.sendStream(bytes) }
+        else { link?.send(Msg.SpriteHeader(name, bytes.size), to); link?.sendStream(bytes, to) }
+    }
+
+    /** A STREAM payload arrived: on the host it is a spoken action (after an AudioHeader); on a client it is the monster sprite. */
     private fun onBinary(endpointId: String, bytes: ByteArray) {
+        if (role.value == Role.CLIENT) {
+            val h = pendingSprite ?: return
+            pendingSprite = null
+            runCatching { File(app.cacheDir, h.name).writeBytes(bytes); spriteVersion.value++ }
+            return
+        }
         if (role.value != Role.HOST) return
         val h = pendingAudio.remove(endpointId) ?: run { status.value = "audio without header"; return }
         scope.launch { resolve(h.playerId, null, bytes, h.headingDeg, h.lat, h.lon) }
@@ -345,18 +368,22 @@ class GameSession(private val app: Application) {
             .getOrElse { state.update { s -> s.copy(busy = false).withLog("camera failed: ${it.message}") }; broadcast(); return@launch }
         val bearing = compass.heading.value
         val loc = locator.location.value
+        val spriteJob = async(Dispatchers.IO) { runCatching { SpriteMaker.make(app, path) }.getOrNull() }
         val conditions = env.describe()
         val lair = state.value.bossLair
         val t0 = System.currentTimeMillis()
         val (spawned, text) = runCatching { g.spawn(path, walked, conditions, lair?.let { "${it.name} (${it.lore})" }) }
             .getOrElse { state.update { s -> s.copy(busy = false).withLog("Gemma error: ${it.message}") }; broadcast(); return@launch }
         if (spawned == null) {
+            spriteJob.cancel()
             state.update { it.copy(busy = false).withLog("The DM hesitates: ${text.take(200)}") }
         } else {
             // Exploring pays: every 4 steps walked since the last fight adds 1 HP (cap +50).
             val bonus = min(walked / 4, 50)
             val hp = (spawned.hp + bonus) * (if (lair != null) 3 else 2) / 2
-            val m = Monster(if (lair != null) "👑 ${spawned.name}" else spawned.name, hp, hp, spawned.attacks, spawned.weakness, spawned.flavor, bearing, loc?.latitude ?: 0.0, loc?.longitude ?: 0.0, spawned.emoji, spawned.accessories)
+            val spriteName = spriteJob.await()?.name ?: ""
+            if (spriteName.isNotBlank()) spriteVersion.value++
+            val m = Monster(if (lair != null) "👑 ${spawned.name}" else spawned.name, hp, hp, spawned.attacks, spawned.weakness, spawned.flavor, bearing, loc?.latitude ?: 0.0, loc?.longitude ?: 0.0, loc?.accuracy ?: 999f, spawned.emoji, spawned.accessories, spriteName)
             steps.reset()
             fightStartedAt = System.currentTimeMillis()
             statsStore.update { it.copy(spawns = it.spawns + 1, spawnMs = it.spawnMs + (System.currentTimeMillis() - t0), stepsWalked = it.stepsWalked + walked, toolRetries = g.retries) }
@@ -539,9 +566,25 @@ class GameSession(private val app: Application) {
         broadcast()
     }
 
-    /** Bearing a player should face to see the monster. Uses GPS geometry only when far enough apart for GPS to mean anything. */
+    /** Host: the monster moves to face the player who turned away (or re-pins on long press). */
+    fun reanchorMonster(chase: Boolean) {
+        if (role.value != Role.HOST) return
+        val h = compass.heading.value
+        val loc = locator.location.value
+        state.update { s ->
+            val m = s.monster ?: return@update s
+            if (s.phase != Phase.BATTLE) return@update s
+            val moved = m.copy(bearingDeg = h, lat = loc?.latitude ?: m.lat, lon = loc?.longitude ?: m.lon, acc = loc?.accuracy ?: m.acc)
+            if (chase) s.copy(monster = moved, fx = Fx(nextSeq(s), taunt = "YOU CAN'T RUN!", label = "chase")).withLog("👣 ${m.name} lumbers around to face you.")
+            else s.copy(monster = moved).withLog("📍 ${m.name} re-pinned where you're looking.")
+        }
+        broadcast()
+    }
+
+    /** Bearing a player should face to see the monster. GPS geometry only when both fixes are sharp and the gap is real; indoors that is never, so the spawn bearing rules. */
     fun bearingToMonster(m: Monster, p: Player?): Float {
         if (p == null || p.lat == 0.0 || m.lat == 0.0) return m.bearingDeg
+        if (p.acc > GPS_MAX_ACC_METERS || m.acc > GPS_MAX_ACC_METERS) return m.bearingDeg
         if (distanceMeters(p.lat, p.lon, m.lat, m.lon) < GPS_MIN_METERS) return m.bearingDeg
         val dLon = Math.toRadians(m.lon - p.lon)
         val lat1 = Math.toRadians(p.lat); val lat2 = Math.toRadians(m.lat)
@@ -560,9 +603,10 @@ class GameSession(private val app: Application) {
 
     companion object {
         const val MODEL_NAME = "gemma-4-E2B-it.litertlm"
-        const val FACING_TOLERANCE_DEG = 40f
+        const val FACING_TOLERANCE_DEG = 50f
         const val FLANK_MIN_DEG = 60f
-        const val GPS_MIN_METERS = 15f
+        const val GPS_MIN_METERS = 25f
+        const val GPS_MAX_ACC_METERS = 10f
         const val POTION_HEAL = 12
         const val SECOND_WIND_HP = 6
     }

@@ -18,9 +18,12 @@ data class Monster(
     val bearingDeg: Float,
     val lat: Double,
     val lon: Double,
+    val acc: Float = 999f,
     val emoji: String = "👾",
     /** Emoji features Gemma pins onto the real object: eyes, horns, a weapon, an aura. */
     val accessories: List<String> = emptyList(),
+    /** Cut-out PNG of the real object (file name in the app cache); sent to clients as a stream. */
+    val sprite: String = "",
 )
 
 @Serializable
@@ -32,6 +35,7 @@ data class Player(
     val headingDeg: Float = 0f,
     val lat: Double = 0.0,
     val lon: Double = 0.0,
+    val acc: Float = 999f,
     val xp: Int = 0,
     val level: Int = 1,
     val items: List<String> = emptyList(),
@@ -99,6 +103,10 @@ sealed class Msg {
     /** Precedes a STREAM payload carrying a WAV clip of the player's spoken action. */
     @Serializable @SerialName("audio")
     data class AudioHeader(val playerId: String, val headingDeg: Float, val lat: Double, val lon: Double, val bytes: Int) : Msg()
+
+    /** Precedes a STREAM payload carrying the monster's cut-out PNG. */
+    @Serializable @SerialName("sprite")
+    data class SpriteHeader(val name: String, val bytes: Int) : Msg()
 
     @Serializable @SerialName("potion")
     data class Potion(val playerId: String) : Msg()

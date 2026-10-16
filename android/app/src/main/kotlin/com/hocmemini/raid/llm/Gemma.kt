@@ -66,7 +66,7 @@ class GameTools : ToolSet {
         @ToolParam(description = "Damage this action deals to the monster, 0 to 15. Use the top of the range if it exploits the weakness or a carried item, 0 if it is nonsense or cowardly.") damageToMonster: Int,
         @ToolParam(description = "Damage the monster deals back to this player, 0 to 8") damageToPlayer: Int,
         @ToolParam(description = "One or two punchy sentences narrating the exchange in second person. Describe the blow and its effect; never say the monster or player is dead or defeated.") narration: String,
-        @ToolParam(description = "How creative, funny or specific the action was: 1 boring or repeated, 3 decent, 5 legendary. Absurd ideas that fit the object score high.") style: Int,
+        @ToolParam(description = "Style rating. 1 = boring, vague or repeated. 2 = plain attack. 3 = decent, fits the monster. 4 = clever or funny, uses the weakness or an item well. 5 = rare: a genuinely inspired, hilarious, object-specific idea nobody expected. Most actions are 2 or 3; give 5 at most once in a few turns.") style: Int,
         @ToolParam(description = "One short line the monster shouts back at the player, ALL CAPS, under 8 words, e.g. TAKE THAT, INTREPID FOOL") taunt: String,
     ): Map<String, Any> {
         resolved = Resolved(damageToMonster.coerceIn(0, 30), damageToPlayer.coerceIn(0, 12), narration, style.coerceIn(1, 5), taunt.take(60))

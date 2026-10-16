@@ -26,6 +26,9 @@
         android:largeHeap="true"
         android:allowBackup="false">
 
+        <!-- ML Kit subject segmentation model: download at install time -->
+        <meta-data android:name="com.google.mlkit.vision.DEPENDENCIES" android:value="subject_segment" />
+
         <!-- LiteRT-LM GPU backend (OpenCL) -->
         <uses-native-library android:name="libvndksupport.so" android:required="false" />
         <uses-native-library android:name="libOpenCL.so" android:required="false" />

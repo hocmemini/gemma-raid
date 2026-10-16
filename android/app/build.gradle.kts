@@ -50,6 +50,7 @@ dependencies {
     implementation(libs.litertlm)
     implementation(libs.play.services.nearby)
     implementation(libs.play.services.location)
+    implementation(libs.mlkit.subject.segmentation)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
 }
