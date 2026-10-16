@@ -102,3 +102,31 @@ def drone(dur, f, vol):
     return out
 save("sfx_ambient_battle",  mix(drone(4.0, 55, 0.18), noise(4.0, 0.05, 0.5, 0.5, 1.0, 0.5, lp=0.03)))
 save("sfx_ambient_explore", mix(drone(4.0, 110, 0.07), noise(4.0, 0.06, 0.5, 0.5, 1.0, 0.5, lp=0.02)))
+
+# ---- third batch: music-ish loops + heartbeat ----
+def note_seq(notes, dur_each, wave_="square", vol=0.12):
+    out = []
+    for f in notes:
+        out += tone(dur_each, f, None, wave_, vol, 0.004, 0.03, 0.55, 0.05) if f else [0.0] * int(SR * dur_each)
+    return out
+def bass_seq(notes, dur_each, vol=0.16):
+    out = []
+    for f in notes:
+        out += tone(dur_each, f, f * 0.98, "tri", vol, 0.005, 0.08, 0.6, 0.1)
+    return out
+A, C, D, E, F, G = 110.0, 130.81, 146.83, 164.81, 174.61, 196.0
+# battle: 8 s, 120 bpm, A minor arpeggio over a driving bass
+arp = [A*2, C*2, E*2, A*4, E*2, C*2, A*2, E*1] * 4 + [F*2, A*2, C*4, F*4, C*4, A*2, F*2, C*2] * 2 + [G*2, D*4, G*4, D*4, G*2, D*2, G*2, D*2] * 2
+bass = [A, A, A, A, A, A, A*1.5, A] * 2 + [F, F, F, F, F, F, F*1.5, F] + [G, G, G, G, G, G, G*1.5, G]
+battle = mix(note_seq(arp, 0.125, "square", 0.09), bass_seq(bass, 0.25, 0.14), drone(8.0, 55, 0.08))
+save("sfx_ambient_battle", battle)
+# explore: 8 s, slow pad + sparse plucks
+pad = mix(drone(8.0, 110, 0.05), drone(8.0, 164.81, 0.03), drone(8.0, 220, 0.02))
+plucks = note_seq([A*4, 0, 0, E*4, 0, 0, C*4, 0, 0, 0, G*2, 0, 0, 0, 0, 0] * 2, 0.25, "tri", 0.07)
+save("sfx_ambient_explore", mix(pad, plucks, noise(8.0, 0.03, 0.5, 0.5, 1.0, 0.5, lp=0.02)))
+# heartbeat: 4 s loop, ~70 bpm, lub-dub
+hb = []
+for i in range(4):
+    hb += tone(0.12, 60, 45, "sine", 0.9, 0.002, 0.04, 0.5, 0.06) + [0.0] * int(SR * 0.14) + tone(0.10, 55, 40, "sine", 0.7, 0.002, 0.04, 0.5, 0.05) + [0.0] * int(SR * (0.86 - 0.12 - 0.14 - 0.10))
+save("sfx_heartbeat", hb[: int(SR * 4.0)])
+save("sfx_crit", mix(tone(0.5, 880, 1760, "square", 0.3, 0.002, 0.1, 0.5, 0.3), noise(0.5, 0.3, 0.002, 0.08, 0.4, 0.3, lp=0.5)))

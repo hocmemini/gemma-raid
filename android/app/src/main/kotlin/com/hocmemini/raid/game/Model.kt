@@ -177,6 +177,12 @@ sealed class Msg {
     @Serializable @SerialName("parry")
     data class Parry(val playerId: String) : Msg()
 
+    @Serializable @SerialName("ping")
+    data class Ping(val t: Long) : Msg()
+
+    @Serializable @SerialName("pong")
+    data class Pong(val t: Long, val playerId: String) : Msg()
+
     @Serializable @SerialName("pose")
     data class Pose(val playerId: String, val headingDeg: Float, val lat: Double, val lon: Double) : Msg()
 

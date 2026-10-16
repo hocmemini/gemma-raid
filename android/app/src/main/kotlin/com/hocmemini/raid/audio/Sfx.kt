@@ -23,6 +23,7 @@ class Sfx(context: Context) {
         "coins" to R.raw.sfx_coins, "hurt" to R.raw.sfx_hurt, "whoosh" to R.raw.sfx_whoosh, "steps" to R.raw.sfx_steps,
         "ping" to R.raw.sfx_ping, "join" to R.raw.sfx_join, "windup" to R.raw.sfx_windup,
         "ambient_battle" to R.raw.sfx_ambient_battle, "ambient_explore" to R.raw.sfx_ambient_explore,
+        "heartbeat" to R.raw.sfx_heartbeat, "crit" to R.raw.sfx_crit,
     ).mapValues { (_, res) -> pool.load(context, res, 1) }
     private val main = Handler(Looper.getMainLooper())
     private var ttsReady = false

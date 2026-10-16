@@ -188,6 +188,8 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit, onMo
     val steps by vm.steps.sinceReset.collectAsState()
     val recording by vm.recording.collectAsState()
     val envNow by vm.env.summary.collectAsState()
+    val latencyNow by vm.latency.collectAsState()
+    val lastPing by vm.lastPingFromHost.collectAsState()
     var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
     var action by remember { mutableStateOf("") }
     var menuOpen by remember { mutableStateOf(false) }
@@ -288,15 +290,20 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit, onMo
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         CameraPreview(Modifier.fillMaxSize()) { imageCapture = it; vm.camera = it }
-        DungeonVignette(intensity = if (state.phase == Phase.BATTLE) 1f else 0.8f)
+        val danger = state.phase == Phase.BATTLE && self != null && self.hp > 0 && self.hp * 100 / maxOf(1, self.maxHp) <= 30
+        DungeonVignette(intensity = if (state.phase == Phase.BATTLE) 1f else 0.8f, danger = danger)
         if (isHost && state.phase == Phase.EXPLORE) Reticle()
         // long-press anywhere: re-pin the monster to where you're looking (compass drift fix)
         if (isHost && (state.phase == Phase.BATTLE || state.phase == Phase.NPC)) {
             Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures(onLongPress = { vm.reanchorMonster(chase = false) }) })
         }
 
-        if (monster != null && (state.phase == Phase.BATTLE || state.phase == Phase.NPC || (state.phase == Phase.EXPLORE && state.busy))) {
-            MonsterOverlay(monster, delta = headingDelta(heading, vm.bearingToMonster(monster, self)), fx = state.fx, spriteVersion = spriteVersion, allies = self?.companions ?: emptyList())
+        val shake = remember { Animatable(0f) }
+        LaunchedEffect(state.fx?.seq) { val f = state.fx ?: return@LaunchedEffect; if (f.crit || (f.taken >= 6)) { repeat(5) { shake.animateTo(if (it % 2 == 0) 14f else -14f, tween(40)) }; shake.animateTo(0f, tween(40)) } }
+        Box(Modifier.fillMaxSize().graphicsLayer { translationX = shake.value; translationY = shake.value * 0.6f }) {
+            if (monster != null && (state.phase == Phase.BATTLE || state.phase == Phase.NPC || (state.phase == Phase.EXPLORE && state.busy))) {
+                MonsterOverlay(monster, delta = headingDelta(heading, vm.bearingToMonster(monster, self)), fx = state.fx, spriteVersion = spriteVersion, allies = self?.companions ?: emptyList())
+            }
         }
         Splashes(vm, state, spriteVersion)
         FxLayer(state.fx, vm.selfId)
@@ -311,7 +318,7 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit, onMo
                             color = if (p.hp > 0) Color.White else Color.Red,
                             fontWeight = if (p.id == vm.selfId) FontWeight.Bold else FontWeight.Normal, fontSize = 13.sp,
                         )
-                        LinearProgressIndicator(progress = { p.hp.toFloat() / p.maxHp }, modifier = Modifier.width(120.dp).height(5.dp))
+                        LinearProgressIndicator(progress = { p.hp.toFloat() / p.maxHp }, modifier = Modifier.width(120.dp).height(5.dp), color = hpColor(p.hp, p.maxHp))
                         Text("${p.hp}/${p.maxHp} · ${p.xp} xp · 🧪${p.potions}${if (p.companions.isNotEmpty()) " · " + p.companions.joinToString("") { it.emoji } else ""}", color = Color.White.copy(alpha = 0.85f), fontSize = 11.sp)
                         if (p.items.isNotEmpty()) Text("🎁 " + p.items.takeLast(3).joinToString(" · ") { it.name }, color = Color(0xFFFFD54F), fontSize = 11.sp)
                     }
@@ -337,6 +344,9 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit, onMo
                     if (state.lurking > 0 && state.phase == Phase.EXPLORE) add("👁 ${state.lurking} lurking")
                     state.quests.firstOrNull { !it.done }?.let { add("📜 ${it.title} (${it.progress}/${it.target})") }
                     if (state.dungeon.isNotBlank() && state.phase == Phase.EXPLORE) add("🏰 ${state.dungeon}")
+                    val lat = latencyNow
+                    if (isHost && lat.isNotEmpty()) add("📶 ${lat.size} player${if (lat.size > 1) "s" else ""} · ${lat.values.average().toInt()} ms")
+                    if (!isHost && lastPing > 0) add(if (System.currentTimeMillis() - lastPing > 15000) "📶 host silent" else "📶 host ok")
                 }
                 if (chips.isNotEmpty()) Text(chips.joinToString(" · "), color = Color.White.copy(alpha = 0.9f), fontSize = 12.sp,
                     modifier = Modifier.background(Color.Black.copy(alpha = 0.4f), RoundedCornerShape(6.dp)).padding(4.dp))
@@ -680,8 +690,8 @@ private fun MonsterOverlay(m: Monster, delta: Float, fx: Fx?, spriteVersion: Int
                     Text("${m.emoji} ${m.name}", fontSize = 17.sp, fontWeight = FontWeight.Black)
                     if (m.friendly) Text("${m.role} · ${m.offer}", fontSize = 11.sp)
                     else {
-                        LinearProgressIndicator(progress = { m.hp.toFloat() / m.maxHp }, modifier = Modifier.width(200.dp).height(7.dp))
-                        Text("${m.hp}/${m.maxHp} · weak to ${m.weakness}", fontSize = 11.sp)
+                        LinearProgressIndicator(progress = { m.hp.toFloat() / m.maxHp }, modifier = Modifier.width(200.dp).height(7.dp), color = hpColor(m.hp, m.maxHp))
+                        Text("${if (m.hp * 100 / maxOf(1, m.maxHp) <= 20) "💀 " else ""}${m.hp}/${m.maxHp} · weak to ${m.weakness}", fontSize = 11.sp)
                     }
                 } }
             }
@@ -851,6 +861,7 @@ private fun Splashes(vm: GameSession, state: com.hocmemini.raid.game.GameState, 
                     .pointerInput(Unit) { detectTapGestures { victoryDismissed = true } },
                 contentAlignment = Alignment.Center,
             ) {
+                Confetti(key = v.name)
                 Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(24.dp).graphicsLayer { scaleX = scale.value; scaleY = scale.value }) {
                     Text("💥 SLAIN", color = Dungeon.gold, style = MaterialTheme.typography.displayLarge, fontSize = 40.sp)
                     Text("${v.emoji} ${v.name}", color = Dungeon.parchment, style = MaterialTheme.typography.headlineMedium, textAlign = TextAlign.Center)
@@ -881,6 +892,29 @@ private fun Splashes(vm: GameSession, state: com.hocmemini.raid.game.GameState, 
                 Text("Your character keeps its XP, items and companions.", color = Dungeon.parchment.copy(alpha = 0.7f), fontSize = 12.sp, textAlign = TextAlign.Center)
                 if (isHost) Button({ vm.nextEncounter() }) { Text("Regroup at half health") } else Text("waiting for the host…", color = Dungeon.parchment.copy(alpha = 0.5f), fontSize = 11.sp)
             }
+        }
+    }
+}
+
+private fun hpColor(hp: Int, max: Int): Color {
+    val pct = hp * 100 / maxOf(1, max)
+    return when { pct <= 20 -> Color(0xFFFF5252); pct <= 50 -> Color(0xFFFFA726); else -> Color(0xFF69F0AE) }
+}
+
+/** Emoji burst from the centre, once per victory. */
+@Composable
+private fun Confetti(key: String) {
+    val t = remember(key) { Animatable(0f) }
+    val parts = remember(key) { val r = java.util.Random(key.hashCode().toLong()); List(22) { Triple(r.nextFloat() * 6.283f, 0.5f + r.nextFloat(), listOf("✨", "⚔️", "💰", "🎉", "💥", "🏆")[r.nextInt(6)]) } }
+    LaunchedEffect(key) { t.snapTo(0f); t.animateTo(1f, tween(1400, easing = FastOutSlowInEasing)) }
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        val w = with(LocalDensity.current) { maxWidth.toPx() }
+        parts.forEach { (ang, speed, e) ->
+            Text(e, fontSize = 26.sp, modifier = Modifier.align(Alignment.Center).graphicsLayer {
+                val d = t.value * speed * w * 0.55f
+                translationX = cos(ang) * d; translationY = sin(ang) * d + t.value * t.value * 260f
+                alpha = 1f - t.value * t.value; rotationZ = t.value * 360f * speed
+            })
         }
     }
 }

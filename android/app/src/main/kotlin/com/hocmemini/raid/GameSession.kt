@@ -114,6 +114,11 @@ class GameSession(private val app: Application) {
     private val pendingAudio = mutableMapOf<String, Msg.AudioHeader>()
     private var pendingSprite: Msg.SpriteHeader? = null
     val spriteVersion = MutableStateFlow(0)
+    /** Host: round-trip ms per connected player id; client: ms to the host. */
+    val latency = MutableStateFlow<Map<String, Long>>(emptyMap())
+    val lastPingFromHost = MutableStateFlow(0L)
+    private var pingJob: Job? = null
+    private val endpointPlayer = mutableMapOf<String, String>()
     private var sensorsRunning = false
     private var raidStartedAt = 0L
     private var fightStartedAt = 0L
@@ -285,6 +290,7 @@ class GameSession(private val app: Application) {
         sfx.loop("ambient_explore")
         startScout()
         nameTheDungeon()
+        pingJob?.cancel(); pingJob = scope.launch { while (true) { delay(5000); if (role.value != Role.HOST) break; link?.send(Msg.Ping(System.currentTimeMillis())) } }
     }
 
     /** One structured call when the raid opens: the DM names the place. Runs when the engine is free. */
@@ -318,6 +324,7 @@ class GameSession(private val app: Application) {
         if (recording.value) recorder.stop()
         recording.value = false
         windupJob?.cancel(); windupJob = null
+        pingJob?.cancel(); pingJob = null; latency.value = emptyMap(); lastPingFromHost.value = 0
         scoutJob?.cancel(); scoutJob = null; lurkers.value = emptyList(); ambushAtSteps = -1
         runCatching { link?.stop() }; link = null
         peers.value = emptyList(); pendingAudio.clear(); pendingSprite = null
@@ -367,6 +374,8 @@ class GameSession(private val app: Application) {
                 sfx.play("join"); broadcast()
                 state.value.monster?.sprite?.takeIf { it.isNotBlank() }?.let { sendSprite(it, listOf(endpointId)) }
             }
+            is Msg.Ping -> if (role.value == Role.CLIENT) { lastPingFromHost.value = System.currentTimeMillis(); link?.send(Msg.Pong(msg.t, selfId)) }
+            is Msg.Pong -> if (role.value == Role.HOST) { val rtt = System.currentTimeMillis() - msg.t; latency.value = latency.value + (msg.playerId to rtt); endpointPlayer[endpointId] = msg.playerId }
             is Msg.Pose -> if (role.value == Role.HOST) state.update { s ->
                 val p = s.players[msg.playerId] ?: return@update s
                 s.copy(players = s.players + (p.id to p.copy(headingDeg = msg.headingDeg, lat = msg.lat, lon = msg.lon)))
@@ -410,12 +419,19 @@ class GameSession(private val app: Application) {
     private fun wireState(s: GameState): GameState = s.copy(log = s.log.takeLast(14), omens = s.omens.take(6))
     private fun broadcast() { trackFx(state.value); absorbLog(state.value); state.value.players[selfId]?.let { saveCharacter(it) }; link?.send(Msg.State(wireState(state.value))) }
 
-    private fun onPhaseChanged(phase: Phase) {
-        when (phase) {
-            Phase.BATTLE -> sfx.loop("ambient_battle")
-            Phase.EXPLORE, Phase.NPC, Phase.VICTORY, Phase.DEFEAT -> sfx.loop("ambient_explore")
-            else -> sfx.stopLoop()
+    private fun ambientFor(s: GameState): String {
+        val me = s.players[selfId]
+        return when {
+            s.phase == Phase.BATTLE && me != null && me.hp > 0 && me.hp * 100 / maxOf(1, me.maxHp) <= 30 -> "heartbeat"
+            s.phase == Phase.BATTLE -> "ambient_battle"
+            s.phase == Phase.LOBBY -> ""
+            else -> "ambient_explore"
         }
+    }
+
+    private fun onPhaseChanged(phase: Phase) {
+        val a = ambientFor(state.value)
+        if (a.isBlank()) sfx.stopLoop() else sfx.loop(a)
         if (role.value == Role.HOST) { if (phase == Phase.EXPLORE) startScout() else scoutJob?.cancel() }
     }
 
@@ -561,6 +577,7 @@ class GameSession(private val app: Application) {
     // ---------- stats & sound from the synced Fx stream (both roles) ----------
 
     private fun trackFx(s: GameState) {
+        if (s.phase != Phase.LOBBY) ambientFor(s).let { if (it.isNotBlank()) sfx.loop(it) }
         val f = s.fx ?: return
         if (f.seq == lastFxSeq) return
         lastFxSeq = f.seq
@@ -613,6 +630,7 @@ class GameSession(private val app: Application) {
                 else if (f.playerId.isNotBlank() && f.potion == 0 && f.taken == 0 && !f.killed) { sfx.play("miss"); sfx.play("whoosh", 120) }
                 if (f.companionHits.isNotEmpty()) { sfx.play("hit", 420, 0.7f, 1.3f); sfx.speak("${f.companionHits.first()}!", 0.7f, 1.1f, 350) }
                 if (f.label == "LEGENDARY!") sfx.play("legendary", 200)
+                if (f.crit) sfx.play("crit", 60, 0.8f)
                 if (f.potion > 0) sfx.play("potion", 150)
                 if (f.parried) sfx.play("parry", 320)
                 else if (f.taken > 0) { sfx.play("attack", 260); if (f.playerId == selfId) sfx.play("hurt", 520) }

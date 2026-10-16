@@ -58,12 +58,14 @@ fun RaidTheme(content: @Composable () -> Unit) = MaterialTheme(colorScheme = sch
 
 /** Torch-lit vignette over the camera: dark edges that breathe, a warm tint, so the office reads as a dungeon. */
 @Composable
-fun DungeonVignette(intensity: Float = 1f) {
+fun DungeonVignette(intensity: Float = 1f, danger: Boolean = false) {
     val flicker by rememberInfiniteTransition(label = "torch").animateFloat(0f, 1f, infiniteRepeatable(tween(2300, easing = LinearEasing), RepeatMode.Restart), label = "f")
+    val pulse by rememberInfiniteTransition(label = "pulse").animateFloat(0f, 1f, infiniteRepeatable(tween(850, easing = LinearEasing), RepeatMode.Reverse), label = "p")
     Canvas(Modifier.fillMaxSize()) {
         val t = flicker * 6.283f
         val wob = 0.06f * sin(t * 3f) + 0.04f * sin(t * 7.3f)
         val r = size.maxDimension * (0.62f + wob)
+        if (danger) drawRect(Brush.radialGradient(0f to Color.Transparent, 0.6f to Color.Transparent, 1f to Color(0xFFB71C1C).copy(alpha = 0.35f + 0.3f * pulse), center = Offset(size.width / 2, size.height / 2), radius = size.maxDimension * 0.7f))
         drawRect(Brush.radialGradient(
             0f to Color.Transparent, 0.55f to Color(0x22140A00), 1f to Color(0xE60A0603).copy(alpha = (0.9f + wob) * intensity),
             center = Offset(size.width / 2, size.height * 0.45f), radius = r,
