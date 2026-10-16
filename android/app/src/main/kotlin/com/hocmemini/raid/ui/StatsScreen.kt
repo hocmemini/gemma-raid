@@ -23,6 +23,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.hocmemini.raid.GameSession
 import com.hocmemini.raid.game.Stats
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 
 @Composable
 fun StatsScreen(vm: GameSession, onBack: () -> Unit) {
@@ -60,9 +67,13 @@ fun StatsScreen(vm: GameSession, onBack: () -> Unit) {
         StatCard("Hall of monsters") {
             if (st.history.isEmpty()) Text("Nothing slain yet.")
             st.history.asReversed().forEach { e ->
-                Column(Modifier.padding(vertical = 4.dp)) {
-                    Text("${e.emoji} ${e.name}${if (e.boss) " 👑" else ""} · ${e.maxHp} HP", fontWeight = FontWeight.SemiBold)
-                    Text("${e.outcome} · ${e.turns} turns · ${fmtTime(e.seconds)}${if (e.loot.isNotBlank()) " · 🎁 ${e.loot}" else ""}", style = MaterialTheme.typography.bodySmall)
+                Row(Modifier.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    val thumb = remember(e.sprite) { e.sprite.takeIf { it.isNotBlank() }?.let { runCatching { BitmapFactory.decodeFile(it)?.asImageBitmap() }.getOrNull() } }
+                    if (thumb != null) Image(thumb, e.name, Modifier.size(56.dp).padding(end = 8.dp), contentScale = ContentScale.Fit) else Text(e.emoji, modifier = Modifier.padding(end = 8.dp), fontSize = 28.sp)
+                    Column {
+                        Text("${e.name}${if (e.boss) " 👑" else ""} · ${e.maxHp} HP", fontWeight = FontWeight.SemiBold)
+                        Text("${e.outcome} · ${e.turns} turns · ${fmtTime(e.seconds)}${if (e.loot.isNotBlank()) " · 🎁 ${e.loot}" else ""}", style = MaterialTheme.typography.bodySmall)
+                    }
                 }
             }
         }

@@ -10,6 +10,7 @@ import androidx.camera.core.ImageCapture
 import com.hocmemini.raid.audio.Recorder
 import com.hocmemini.raid.audio.Sfx
 import com.hocmemini.raid.camera.SpriteMaker
+import com.hocmemini.raid.camera.TrophyCard
 import com.hocmemini.raid.camera.captureToFile
 import com.hocmemini.raid.game.Ally
 import com.hocmemini.raid.game.Encounter
@@ -446,7 +447,25 @@ class GameSession(private val app: Application) {
     private fun recordEncounter(s: GameState, outcome: String, loot: String = "") {
         val m = s.monster ?: return
         val secs = if (fightStartedAt > 0) ((System.currentTimeMillis() - fightStartedAt) / 1000).toInt() else 0
-        statsStore.update { st -> st.copy(history = (st.history + Encounter(m.emoji, m.name, m.maxHp, outcome, s.turn, secs, loot, m.name.startsWith("👑"))).takeLast(30)) }
+        // keep the cut-out for the bestiary (cache files get evicted; filesDir doesn't)
+        val kept = runCatching {
+            val src = File(app.cacheDir, m.sprite); if (m.sprite.isBlank() || !src.exists()) return@runCatching ""
+            val dir = File(app.filesDir, "bestiary").apply { mkdirs() }
+            val dst = File(dir, "${System.currentTimeMillis()}.png"); src.copyTo(dst, overwrite = true); dst.absolutePath
+        }.getOrDefault("")
+        statsStore.update { st -> st.copy(history = (st.history + Encounter(m.emoji, m.name, m.maxHp, outcome, s.turn, secs, loot, m.name.startsWith("👑"), sprite = kept)).takeLast(40)) }
+    }
+
+    /** Render and save a trophy card for the current victory into Pictures/Raid. */
+    fun saveTrophy() = scope.launch(Dispatchers.IO) {
+        val s = state.value
+        val v = s.victory ?: return@launch
+        val m = s.monster
+        val me = s.players[selfId]
+        val name = runCatching { TrophyCard.save(app, TrophyCard.render(app, v, m?.sprite ?: "", me?.epithet ?: ""), v.name) }.getOrNull()
+        status.value = if (name != null) "trophy saved to Pictures/Raid" else "could not save the trophy"
+        state.update { it.withLog(if (name != null) "🏆 Trophy card saved to Pictures/Raid" else "🏆 Trophy card failed to save") }
+        broadcast()
     }
 
     // ---------- gestures ----------

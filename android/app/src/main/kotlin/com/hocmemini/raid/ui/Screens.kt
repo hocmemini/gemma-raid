@@ -267,7 +267,7 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit, onMo
         }
 
         if (monster != null && (state.phase == Phase.BATTLE || state.phase == Phase.NPC || (state.phase == Phase.EXPLORE && state.busy))) {
-            MonsterOverlay(monster, delta = headingDelta(heading, vm.bearingToMonster(monster, self)), fx = state.fx, spriteVersion = spriteVersion)
+            MonsterOverlay(monster, delta = headingDelta(heading, vm.bearingToMonster(monster, self)), fx = state.fx, spriteVersion = spriteVersion, allies = self?.companions ?: emptyList())
         }
         Splashes(vm, state, spriteVersion)
         FxLayer(state.fx, vm.selfId)
@@ -461,8 +461,10 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit, onMo
  * when it strikes, and bursts when slain. Gemma's emoji features orbit it; taunts pop in a speech bubble.
  */
 @Composable
-private fun MonsterOverlay(m: Monster, delta: Float, fx: Fx?, spriteVersion: Int) {
+private fun MonsterOverlay(m: Monster, delta: Float, fx: Fx?, spriteVersion: Int, allies: List<com.hocmemini.raid.game.Ally> = emptyList()) {
     val context = LocalContext.current
+    val allyBitmaps = remember(allies.map { it.sprite }) { allies.map { a -> a.sprite.takeIf { it.isNotBlank() }?.let { runCatching { BitmapFactory.decodeFile(File(context.cacheDir, it).absolutePath)?.asImageBitmap() }.getOrNull() } } }
+    val allyLunge = remember { Animatable(0f) }
     val sprite: ImageBitmap? = remember(m.sprite, spriteVersion) {
         if (m.sprite.isBlank()) null
         else runCatching { BitmapFactory.decodeFile(File(context.cacheDir, m.sprite).absolutePath)?.asImageBitmap() }.getOrNull()
@@ -500,6 +502,9 @@ private fun MonsterOverlay(m: Monster, delta: Float, fx: Fx?, spriteVersion: Int
         if (f.label == "spawn") { death.snapTo(1f); death.animateTo(0f, tween(650)); return@LaunchedEffect }
         if (f.label == "chase") {
             fly.snapTo(0.5f); fly.animateTo(0f, spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow)); return@LaunchedEffect
+        }
+        if (f.companionHits.isNotEmpty()) {
+            launch { kotlinx.coroutines.delay(380); allyLunge.animateTo(1f, tween(160, easing = FastOutLinearInEasing)); allyLunge.animateTo(0f, spring(dampingRatio = Spring.DampingRatioMediumBouncy)) }
         }
         if (f.dealt > 0) {
             launch { hitFlash.snapTo(1f); hitFlash.animateTo(0f, tween(420)) }
@@ -597,6 +602,25 @@ private fun MonsterOverlay(m: Monster, delta: Float, fx: Fx?, spriteVersion: Int
                     Text(m.emoji, fontSize = 110.sp)
                 }
                 if (death.value > 0.05f && fx?.killed == true) Text("💥", fontSize = (40 + 100 * death.value).sp, modifier = Modifier.graphicsLayer { alpha = 1f - death.value })
+            }
+            // companions: small cut-outs to the lower-left of the ring, lunging in when they strike
+            allies.forEachIndexed { i, a ->
+                val bmpA = allyBitmaps.getOrNull(i)
+                Box(
+                    Modifier.align(Alignment.Center).offset(x = xOff - ringDp * 0.78f, y = ringDp * (0.35f + i * 0.42f)).size(ringDp * 0.36f)
+                        .graphicsLayer {
+                            val bob = sin((dance + i * 0.3f) * 2f * Math.PI.toFloat())
+                            translationX = allyLunge.value * ringPx * 0.5f
+                            translationY = bob * 6f
+                            rotationZ = bob * 4f + allyLunge.value * 15f
+                            scaleX = 1f + allyLunge.value * 0.3f; scaleY = 1f + allyLunge.value * 0.3f
+                            alpha = 1f - death.value
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (bmpA != null) Image(bmpA, a.name, Modifier.fillMaxSize(), contentScale = ContentScale.Fit) else Text(a.emoji, fontSize = 44.sp)
+                    Text(a.name, color = Color.White, fontSize = 9.sp, modifier = Modifier.align(Alignment.BottomCenter).background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(4.dp)).padding(horizontal = 4.dp, vertical = 1.dp))
+                }
             }
             // compact name chip above the ring
             Column(
@@ -790,6 +814,7 @@ private fun Splashes(vm: GameSession, state: com.hocmemini.raid.game.GameState, 
                         Button({ vm.nextEncounter() }) { Text("Explore on") }
                         OutlinedButton({ victoryDismissed = true }) { Text("Linger") }
                     } else Text("tap to continue", color = Dungeon.parchment.copy(alpha = 0.5f), fontSize = 11.sp)
+                    TextButton({ vm.saveTrophy() }) { Text("🏆 Save trophy card to Photos") }
                 }
             }
         }

@@ -10,6 +10,8 @@ import kotlinx.serialization.json.Json
 data class Encounter(
     val emoji: String, val name: String, val maxHp: Int, val outcome: String, val turns: Int, val seconds: Int,
     val loot: String = "", val boss: Boolean = false, val at: Long = System.currentTimeMillis(),
+    /** Absolute path of the saved cut-out (bestiary thumbnail), if any. */
+    val sprite: String = "",
 )
 
 /** Lifetime numbers for this phone. Everything here is derived from game events, no model guesses. */
