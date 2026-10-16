@@ -24,7 +24,10 @@ adjudicates every move through function calls so the game state stays determinis
 | Voice items | `drink_potion` and `use_item(name)` tools: say "I chug a potion" or invoke loot by name while shouting, Gemma calls the tool |
 | AR augmentation | lock-on ring on the object, Gemma-chosen emoji features pinned around it (eyes, horns, a weapon that swings at you), comic speech bubbles with the monster's taunts |
 | Sound | 13 synthesized chiptune effects (`scripts/gen-sfx.py`), monster taunts spoken by Android TTS at low pitch, optional narrate-aloud |
-| Survivability | solo mercy (60% incoming), potions, one second wind per raid, levels raise max HP |
+| Survivability | solo mercy (60% incoming), potions, one second wind per raid, levels raise max HP; monsters strike on their own if you dawdle |
+| Talk | the same text box and hold-to-talk work while exploring (ask the DM for lore and tips) and with NPCs |
+| NPCs | **Meet** turns an object into a merchant, sage, healer or oddball via `spawn_npc`; they `sell_item` for XP, `give_item`, `heal_player` |
+| Levels unlock verbs | L2 Taunt (daze), L3 Parley (talk a monster into an NPC), L4 Bind (a slain monster fights beside you, shouting its move), L5 Recast (declare a new weakness); `use_power` tool, `grant_epithet` names you at each level-up and monsters hear your reputation |
 | Stats | persisted campaign/combat/playstyle/Gemma-latency stats and a hall of monsters |
 
 Every game-affecting number comes out of a tool call, never parsed from prose. Open weights are the whole game: nothing works without the model on the phone.
@@ -61,6 +64,9 @@ Tested on Pixel 8 Pro (Android 17). Any Android 12+ phone with Bluetooth can joi
 - [x] style-scored damage, potions, second wind, voice-activated items
 - [x] animated AR augmentation with speech bubbles; chiptune SFX and TTS monster voice
 - [x] back navigation, HUD menu, stats screen
+- [x] segmented-sprite monster with dance / dodge / perspective strike; chase and re-pin
+- [x] talk anywhere, NPC merchants/sages/healers, idle monster strikes
+- [x] level powers (Taunt, Parley, Bind companions, Recast), epithets, ambient sound loops
 - [ ] optional online mode: `gemma-4-26b-a4b-it` via Gemini API for richer narration
 
 ## License
