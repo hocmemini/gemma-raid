@@ -102,6 +102,10 @@ data class Fx(
 @Serializable
 data class Omen(val signal: String, val name: String, val lore: String, val threat: Int, val dbm: Int)
 
+/** What the victory splash shows; loot arrives a few seconds after the kill. */
+@Serializable
+data class Victory(val name: String, val emoji: String, val xp: Int, val by: String, val loot: String = "", val lootEffect: String = "", val turns: Int = 0)
+
 @Serializable
 data class GameState(
     val phase: Phase = Phase.LOBBY,
@@ -127,6 +131,7 @@ data class GameState(
     val recastUsed: Boolean = false,
     /** Lines ever logged; lets every phone append only new lines to its journal. */
     val logTotal: Int = 0,
+    val victory: Victory? = null,
     /** Set when the strongest omen is menacing enough: the next spawn is its boss. */
     val bossLair: Omen? = null,
 ) {

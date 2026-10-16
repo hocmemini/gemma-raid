@@ -22,6 +22,7 @@ import com.hocmemini.raid.game.Msg
 import com.hocmemini.raid.game.Omen
 import com.hocmemini.raid.game.Phase
 import com.hocmemini.raid.game.Player
+import com.hocmemini.raid.game.Victory
 import com.hocmemini.raid.game.StatsStore
 import com.hocmemini.raid.game.companionCapacity
 import com.hocmemini.raid.game.headingDelta
@@ -421,6 +422,7 @@ class GameSession(private val app: Application) {
             "epithet" -> { sfx.play("levelup"); sfx.narrate(f.say, 400) }
             "windup" -> sfx.play("windup")
             "pin" -> sfx.play("ping")
+            "stir" -> sfx.play("omen", volume = 0.35f, rate = 1.6f)
             "flee" -> { sfx.play("whoosh"); sfx.play("steps", 150) }
             "bind" -> { sfx.play("npc"); sfx.speak(f.taunt, pitch, 1.0f, 300) }
             else -> {
@@ -523,6 +525,15 @@ class GameSession(private val app: Application) {
         val bearing = compass.heading.value
         val loc = locator.location.value
         val spriteJob = async(Dispatchers.IO) { runCatching { SpriteMaker.make(app, path) }.getOrNull() }
+        launch {
+            // the cut-out lands in ~1 s: show it stirring on the table while Gemma writes the sheet
+            val f = spriteJob.await() ?: return@launch
+            spriteVersion.value++
+            if (state.value.busy && state.value.monster == null) {
+                state.update { it.copy(monster = Monster("???", 0, 0, emptyList(), "", "", bearing, loc?.latitude ?: 0.0, loc?.longitude ?: 0.0, loc?.accuracy ?: 999f, "❔", emptyList(), f.name), fx = Fx(nextSeq(it), label = "stir", taunt = "…")) }
+                broadcast(); sendSprite(f.name)
+            }
+        }
         val conditions = env.describe()
         val lair = state.value.bossLair
         val t0 = System.currentTimeMillis()
@@ -530,7 +541,7 @@ class GameSession(private val app: Application) {
             .getOrElse { spriteJob.cancel(); state.update { s -> s.copy(busy = false).withLog("Gemma error: ${it.message?.take(100)}") }; broadcast(); return@launch }
         if (spawned == null) {
             spriteJob.cancel()
-            state.update { it.copy(busy = false).withLog("The DM hesitates: ${text.take(200)}") }
+            state.update { it.copy(busy = false, monster = null).withLog("The DM hesitates: ${text.take(200)}") }
         } else {
             val bonus = min(walked / 4, 50)
             val hp = (spawned.hp + bonus) * (if (lair != null) 3 else 2) / 2
@@ -541,7 +552,7 @@ class GameSession(private val app: Application) {
             journalMark("${m.emoji} ${m.name}")
             statsStore.update { it.copy(spawns = it.spawns + 1, spawnMs = it.spawnMs + (System.currentTimeMillis() - t0), stepsWalked = it.stepsWalked + walked, toolRetries = g.retries) }
             state.update {
-                var s = it.copy(phase = Phase.BATTLE, monster = m, busy = false, turn = 0, steps = 0, env = env.summary.value, parries = emptyList(), bossLair = null, windup = 0, monsterDazed = false, recastUsed = false, fx = Fx(nextSeq(it), label = "spawn", taunt = spawned.taunt))
+                var s = it.copy(phase = Phase.BATTLE, monster = m, busy = false, turn = 0, steps = 0, env = env.summary.value, parries = emptyList(), bossLair = null, windup = 0, monsterDazed = false, recastUsed = false, victory = null, fx = Fx(nextSeq(it), label = "spawn", taunt = spawned.taunt))
                     .withLog("${m.emoji} ${m.name} appears! ${m.flavor}")
                 if (lair != null) s = s.withLog("👑 BOSS FIGHT — champion of ${lair.name}. Double XP.")
                 if (bonus > 0) s = s.withLog("It grew +$bonus HP from the $walked steps you walked.")
@@ -874,7 +885,7 @@ class GameSession(private val app: Application) {
             var players = next.players + (me.id to me)
             if (killed) {
                 players = players.mapValues { (_, q) -> if (q.hp > 0) q.copy(potions = q.potions + 1) else q }
-                next = next.copy(phase = Phase.VICTORY, kills = next.kills + 1).withLog("${m.emoji} ${m.name} is defeated! Everyone standing finds a potion.")
+                next = next.copy(phase = Phase.VICTORY, kills = next.kills + 1, victory = Victory(m.name, m.emoji, xpGain, p.name, turns = next.turn)).withLog("${m.emoji} ${m.name} is defeated! Everyone standing finds a potion.")
             } else if (players.values.all { it.hp <= 0 }) next = next.copy(phase = Phase.DEFEAT).withLog("The party falls. ${m.name} gloats.")
             next.copy(players = players)
         }
@@ -891,7 +902,7 @@ class GameSession(private val app: Application) {
             state.update { s ->
                 val me = s.players[p.id] ?: return@update s
                 var next = s
-                if (loot != null) next = next.copy(players = next.players + (me.id to me.copy(items = (me.items + Item(loot.name, loot.effect)).takeLast(BAG_SLOTS)))).withLog("🎁 ${me.name} loots ${loot.name}: ${loot.effect}")
+                if (loot != null) next = next.copy(players = next.players + (me.id to me.copy(items = (me.items + Item(loot.name, loot.effect)).takeLast(BAG_SLOTS))), victory = next.victory?.copy(loot = loot.name, lootEffect = loot.effect)).withLog("🎁 ${me.name} loots ${loot.name}: ${loot.effect}")
                 if (line.isNotBlank()) next = next.withLog(line.take(200))
                 if (companionCapacity(me.level) > me.companions.size) next = next.withLog("🐾 Level ${me.level} power: you may Bind ${m.name} as a companion.")
                 next
@@ -943,7 +954,7 @@ class GameSession(private val app: Application) {
         if (state.value.phase == Phase.BATTLE) recordEncounter(state.value, "fled")
         windupJob?.cancel()
         steps.reset()
-        state.update { s -> s.copy(phase = Phase.EXPLORE, monster = null, steps = 0, fx = null, windup = 0, players = s.players.mapValues { (_, p) -> p.copy(hp = maxOf(p.hp, p.maxHp / 2), potions = maxOf(p.potions, 1)) }).withLog("The party regroups. Walk around, then point at something new.") }
+        state.update { s -> s.copy(phase = Phase.EXPLORE, monster = null, steps = 0, fx = null, windup = 0, victory = null, players = s.players.mapValues { (_, p) -> p.copy(hp = maxOf(p.hp, p.maxHp / 2), potions = maxOf(p.potions, 1)) }).withLog("The party regroups. Walk around, then point at something new.") }
         onPhaseChanged(Phase.EXPLORE); broadcast()
     }
 

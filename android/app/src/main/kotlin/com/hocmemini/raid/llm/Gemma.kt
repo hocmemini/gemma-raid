@@ -282,7 +282,7 @@ class Gemma(private val modelPath: String, private val backend: Backend, private
             if (environment.isNotBlank()) append("Conditions: $environment. Let that shape the monster. ")
             if (reputation.isNotBlank()) append("The players are known as: $reputation; the monster has heard of them. ")
             if (bossLair != null) append("IMPORTANT: this place is the lair of $bossLair. The monster is its champion or the entity itself: make it a BOSS, hp 60 to 80, more menacing than usual. ")
-            append("Answer as JSON: name (short dramatic, from the object), hp (20-60, bigger objects higher), attacks (2-3 names, comma separated), weakness (one short phrase players could plausibly act on), flavor (1-2 vivid sentences), emoji (one), accessories (2-3 emoji separated by spaces: eyes, horns, a weapon), taunt (what it shouts, ALL CAPS, under 8 words).")
+            append("Answer as compact JSON: name (short dramatic, from the object), hp (20-60, bigger objects higher), attacks (exactly 2 names, comma separated), weakness (one short phrase players could plausibly act on), flavor (one vivid sentence, under 20 words), emoji (one), accessories (exactly 2 emoji separated by a space: eyes and a weapon), taunt (what it shouts, ALL CAPS, under 8 words).")
         }
         val t0 = System.currentTimeMillis()
         var line = ""

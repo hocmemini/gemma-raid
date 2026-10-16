@@ -22,6 +22,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.foundation.Canvas
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
@@ -265,9 +266,10 @@ fun PlayScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit, onMo
             Box(Modifier.fillMaxSize().pointerInput(Unit) { detectTapGestures(onLongPress = { vm.reanchorMonster(chase = false) }) })
         }
 
-        if (monster != null && (state.phase == Phase.BATTLE || state.phase == Phase.NPC)) {
+        if (monster != null && (state.phase == Phase.BATTLE || state.phase == Phase.NPC || (state.phase == Phase.EXPLORE && state.busy))) {
             MonsterOverlay(monster, delta = headingDelta(heading, vm.bearingToMonster(monster, self)), fx = state.fx, spriteVersion = spriteVersion)
         }
+        Splashes(vm, state, spriteVersion)
         FxLayer(state.fx, vm.selfId)
 
         // top HUD: party, then a status strip
@@ -601,7 +603,7 @@ private fun MonsterOverlay(m: Monster, delta: Float, fx: Fx?, spriteVersion: Int
                 Modifier.align(Alignment.Center).offset(x = xOff, y = -(ringDp * 0.82f)).graphicsLayer { alpha = (1f - death.value) * (1f - fly.value) },
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Card { Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                if (m.name != "???") Card { Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("${m.emoji} ${m.name}", fontSize = 17.sp, fontWeight = FontWeight.Black)
                     if (m.friendly) Text("${m.role} · ${m.offer}", fontSize = 11.sp)
                     else {
@@ -719,5 +721,89 @@ private fun Reticle() {
             }
         }
         Text("aim at the thing", color = Color(0xFFD4AF37).copy(alpha = 0.8f), fontSize = 12.sp, modifier = Modifier.offset(y = 90.dp))
+    }
+}
+
+/** Full-screen moments: encounter intro (tap to skip), victory with XP and loot, defeat. */
+@Composable
+private fun Splashes(vm: GameSession, state: com.hocmemini.raid.game.GameState, spriteVersion: Int) {
+    val context = LocalContext.current
+    val isHost = vm.role.collectAsState().value == GameSession.Role.HOST
+    val self = state.players[vm.selfId]
+    var introSeq by remember { mutableStateOf(-1) }
+    var introVisible by remember { mutableStateOf(false) }
+    var victoryDismissed by remember { mutableStateOf(false) }
+    var defeatDismissed by remember { mutableStateOf(false) }
+    val m = state.monster
+
+    // intro: whenever a hostile spawn Fx arrives
+    LaunchedEffect(state.fx?.seq) {
+        val f = state.fx ?: return@LaunchedEffect
+        if (f.label == "spawn" && m != null && !m.friendly && f.seq != introSeq) {
+            introSeq = f.seq; introVisible = true
+            delay(3200); introVisible = false
+        }
+    }
+    LaunchedEffect(state.phase) { if (state.phase != Phase.VICTORY) victoryDismissed = false; if (state.phase != Phase.DEFEAT) defeatDismissed = false }
+
+    val sprite: ImageBitmap? = remember(m?.sprite, spriteVersion) {
+        m?.sprite?.takeIf { it.isNotBlank() }?.let { runCatching { BitmapFactory.decodeFile(File(context.cacheDir, it).absolutePath)?.asImageBitmap() }.getOrNull() }
+    }
+    val scale = remember { Animatable(0.6f) }
+    LaunchedEffect(introVisible, state.phase) { scale.snapTo(0.6f); scale.animateTo(1f, spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow)) }
+
+    when {
+        introVisible && m != null -> Box(
+            Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xEE0A0603), Color(0x99140A00), Color(0xEE0A0603))))
+                .pointerInput(Unit) { detectTapGestures { introVisible = false } },
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(24.dp).graphicsLayer { scaleX = scale.value; scaleY = scale.value }) {
+                Text(if (m.name.startsWith("👑")) "A BOSS APPEARS" else "A FOE APPEARS", color = Dungeon.ember, style = MaterialTheme.typography.titleMedium, letterSpacing = 3.sp)
+                if (sprite != null) Image(sprite, m.name, Modifier.size(240.dp), contentScale = ContentScale.Fit) else Text(m.emoji, fontSize = 140.sp)
+                Text(m.name, color = Dungeon.gold, style = MaterialTheme.typography.displayLarge, fontSize = 34.sp, textAlign = TextAlign.Center)
+                Text(m.flavor, color = Dungeon.parchment, textAlign = TextAlign.Center, fontSize = 15.sp)
+                Text("${m.hp} HP · weak to ${m.weakness}", color = Dungeon.moss, fontWeight = FontWeight.Bold)
+                Text(m.attacks.joinToString(" · "), color = Dungeon.parchment.copy(alpha = 0.7f), fontSize = 12.sp)
+                Text("tap to fight", color = Dungeon.parchment.copy(alpha = 0.5f), fontSize = 11.sp, modifier = Modifier.padding(top = 8.dp))
+            }
+        }
+        state.phase == Phase.VICTORY && !victoryDismissed && state.victory != null -> {
+            val v = state.victory
+            Box(
+                Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xEE0A0603), Color(0x880A0603), Color(0xEE0A0603))))
+                    .pointerInput(Unit) { detectTapGestures { victoryDismissed = true } },
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(24.dp).graphicsLayer { scaleX = scale.value; scaleY = scale.value }) {
+                    Text("💥 SLAIN", color = Dungeon.gold, style = MaterialTheme.typography.displayLarge, fontSize = 40.sp)
+                    Text("${v.emoji} ${v.name}", color = Dungeon.parchment, style = MaterialTheme.typography.headlineMedium, textAlign = TextAlign.Center)
+                    Text("felled by ${v.by} in ${v.turns} turn${if (v.turns == 1) "" else "s"}", color = Dungeon.parchment.copy(alpha = 0.75f), fontSize = 13.sp)
+                    Text("+${v.xp} XP", color = Dungeon.moss, fontWeight = FontWeight.Black, fontSize = 28.sp)
+                    Card(Modifier.widthIn(max = 300.dp)) { Column(Modifier.padding(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        if (v.loot.isBlank()) { Text("🎁 …", fontWeight = FontWeight.Bold); Text("the DM rummages through the remains", fontSize = 12.sp) }
+                        else { Text("🎁 ${v.loot}", fontWeight = FontWeight.Bold); Text(v.lootEffect, fontSize = 12.sp, textAlign = TextAlign.Center) }
+                        Text("🧪 +1 potion for everyone standing", fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
+                    } }
+                    if (isHost) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (self != null && companionCapacity(self.level) > self.companions.size) Button({ vm.bindFallen(); victoryDismissed = true }) { Text("🐾 Bind it") }
+                        Button({ vm.nextEncounter() }) { Text("Explore on") }
+                        OutlinedButton({ victoryDismissed = true }) { Text("Linger") }
+                    } else Text("tap to continue", color = Dungeon.parchment.copy(alpha = 0.5f), fontSize = 11.sp)
+                }
+            }
+        }
+        state.phase == Phase.DEFEAT && !defeatDismissed -> Box(
+            Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xF0140000), Color(0xAA3A0000), Color(0xF0140000))))
+                .pointerInput(Unit) { detectTapGestures { defeatDismissed = true } },
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.padding(24.dp)) {
+                Text("☠ THE PARTY FALLS", color = Dungeon.ember, style = MaterialTheme.typography.displayLarge, fontSize = 32.sp, textAlign = TextAlign.Center)
+                if (m != null) Text("${m.emoji} ${m.name} gloats over you.", color = Dungeon.parchment, textAlign = TextAlign.Center)
+                Text("Your character keeps its XP, items and companions.", color = Dungeon.parchment.copy(alpha = 0.7f), fontSize = 12.sp, textAlign = TextAlign.Center)
+                if (isHost) Button({ vm.nextEncounter() }) { Text("Regroup at half health") } else Text("waiting for the host…", color = Dungeon.parchment.copy(alpha = 0.5f), fontSize = 11.sp)
+            }
+        }
     }
 }
