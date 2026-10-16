@@ -8,6 +8,7 @@ import android.os.VibratorManager
 import androidx.camera.core.ImageCapture
 import com.hocmemini.raid.audio.Recorder
 import com.hocmemini.raid.camera.captureToFile
+import com.hocmemini.raid.game.Fx
 import com.hocmemini.raid.game.GameState
 import com.hocmemini.raid.game.Monster
 import com.hocmemini.raid.game.Msg
@@ -39,6 +40,7 @@ import java.util.UUID
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.ceil
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sin
@@ -160,6 +162,25 @@ class GameSession(private val app: Application) {
         if (role.value == Role.HOST) armParry(selfId) else link?.send(Msg.Parry(selfId))
     }
 
+    fun drinkPotion() {
+        if (state.value.phase != Phase.BATTLE) return
+        if (role.value == Role.HOST) applyPotion(selfId) else link?.send(Msg.Potion(selfId))
+    }
+
+    private fun applyPotion(playerId: String) {
+        state.update { s ->
+            val p = s.players[playerId] ?: return@update s
+            if (p.potions <= 0 || p.hp >= p.maxHp) return@update s
+            val healed = min(POTION_HEAL, p.maxHp - p.hp)
+            s.copy(players = s.players + (p.id to p.copy(hp = p.hp + healed, potions = p.potions - 1)), fx = Fx(nextSeq(s), p.id, label = "🧪 +$healed"))
+                .withLog("🧪 ${p.name} drinks a potion: +$healed HP (${p.potions - 1} left)")
+        }
+        if (playerId == selfId) buzz(30, 30, 30)
+        broadcast()
+    }
+
+    private fun nextSeq(s: GameState) = (s.fx?.seq ?: 0) + 1
+
     private fun armParry(playerId: String) {
         state.update { s ->
             if (playerId in s.parries) s
@@ -207,6 +228,7 @@ class GameSession(private val app: Application) {
             }
             is Msg.AudioHeader -> if (role.value == Role.HOST) pendingAudio[endpointId] = msg
             is Msg.Parry -> if (role.value == Role.HOST) armParry(msg.playerId)
+            is Msg.Potion -> if (role.value == Role.HOST) applyPotion(msg.playerId)
             is Msg.State -> if (role.value == Role.CLIENT) {
                 val before = state.value.players[selfId]?.hp
                 state.value = msg.state
@@ -250,7 +272,7 @@ class GameSession(private val app: Application) {
             val m = Monster(if (lair != null) "👑 ${spawned.name}" else spawned.name, hp, hp, spawned.attacks, spawned.weakness, spawned.flavor, bearing, loc?.latitude ?: 0.0, loc?.longitude ?: 0.0, spawned.emoji)
             steps.reset()
             state.update {
-                var s = it.copy(phase = Phase.BATTLE, monster = m, busy = false, turn = 0, steps = 0, env = env.summary.value, parries = emptyList(), bossLair = null)
+                var s = it.copy(phase = Phase.BATTLE, monster = m, busy = false, turn = 0, steps = 0, env = env.summary.value, parries = emptyList(), bossLair = null, fx = Fx(nextSeq(it), label = "spawn"))
                     .withLog("${m.emoji} ${m.name} appears! ${m.flavor}")
                 if (lair != null) s = s.withLog("👑 BOSS FIGHT — champion of ${lair.name}. Double XP.")
                 if (conditions.isNotBlank()) s = s.withLog("(${conditions.replaceFirstChar { c -> c.uppercase() }}.)")
@@ -335,15 +357,20 @@ class GameSession(private val app: Application) {
         if (flanking) dmg = (dmg * 1.5f).roundToInt()
         val cry = if (audioWav != null) (wavLoudness(audioWav) * 5f).roundToInt() else 0
         if (dmg > 0) dmg += cry
+        val crit = r.style >= 4
+        if (r.style >= 5) dmg *= 2 else if (r.style == 4) dmg = (dmg * 1.5f).roundToInt()
         val parried = playerId in s0.parries
-        val hurt = if (parried) 0 else r.damageToPlayer
+        val aliveCount = s0.players.values.count { it.hp > 0 }
+        // Solo mercy: a lone player takes 60% of the monster's damage.
+        var hurt = if (parried) 0 else r.damageToPlayer
+        if (aliveCount <= 1 && hurt > 0) hurt = ceil(hurt * 0.6f).toInt()
         val newMonsterHp = (m.hp - dmg).coerceAtLeast(0)
-        val newPlayerHp = (p.hp - hurt).coerceAtLeast(0)
         val killed = newMonsterHp == 0
         val boss = m.name.startsWith("👑")
-        val xpGain = ((if (dmg > 0) 10 else 0) + (if (killed) 50 else 0)) * (if (boss) 2 else 1)
+        val xpGain = ((if (dmg > 0) 10 else 0) + (if (killed) 50 else 0) + (if (r.style >= 5) 20 else 0)) * (if (boss) 2 else 1)
         val tag = buildString {
             append("−$dmg ${m.name}")
+            if (r.style >= 5) append(" ★ LEGENDARY ×2") else if (r.style == 4) append(" ★ stylish ×1.5")
             if (flanking) append(" (flank!)")
             if (!facing) append(" (not facing it)")
             if (cry > 0) append(" (battle cry +$cry)")
@@ -352,20 +379,31 @@ class GameSession(private val app: Application) {
             if (xpGain > 0) append(", +$xpGain xp")
         }
         if (playerId == selfId && hurt > 0) buzz(120)
+        var wind = false
         state.update { s ->
-            var me = p.copy(hp = newPlayerHp, xp = p.xp + xpGain)
+            val cur = s.players[p.id] ?: p   // re-read: a potion may have landed while Gemma was thinking
+            var hpNow = (cur.hp - hurt).coerceAtLeast(0)
+            var me = cur.copy(hp = hpNow, xp = cur.xp + xpGain, headingDeg = headingDeg, lat = lat, lon = lon)
+            if (hpNow == 0 && me.secondWind && !killed) { wind = true; me = me.copy(hp = SECOND_WIND_HP, secondWind = false) }
             val newLevel = levelFor(me.xp)
-            var next = s.copy(busy = false, turn = s.turn + 1, monster = m.copy(hp = newMonsterHp), parries = s.parries - playerId).withLog(r.narration).withLog(tag)
+            var next = s.copy(
+                busy = false, turn = s.turn + 1, monster = m.copy(hp = newMonsterHp), parries = s.parries - playerId,
+                fx = Fx(nextSeq(s), playerId, dealt = dmg, taken = hurt, crit = crit, parried = parried && r.damageToPlayer > 0, killed = killed,
+                    label = if (r.style >= 5) "LEGENDARY!" else if (r.style == 4) "stylish" else ""),
+            ).withLog(r.narration).withLog(tag)
+            if (wind) next = next.withLog("💫 ${me.name} refuses to fall — second wind! Back up with ${SECOND_WIND_HP} HP.")
             if (newLevel > me.level) {
                 me = me.copy(level = newLevel, maxHp = maxHpFor(newLevel), hp = maxHpFor(newLevel))
                 next = next.withLog("⬆ ${me.name} reached level $newLevel! Max HP ${me.maxHp}, fully healed.")
             }
-            val players = next.players + (me.id to me)
-            next = next.copy(players = players)
-            if (killed) next = next.copy(phase = Phase.VICTORY, kills = next.kills + 1).withLog("${m.emoji} ${m.name} is defeated!")
-            else if (players.values.all { it.hp <= 0 }) next = next.copy(phase = Phase.DEFEAT).withLog("The party falls. ${m.name} gloats.")
-            next
+            var players = next.players + (me.id to me)
+            if (killed) {
+                players = players.mapValues { (_, q) -> if (q.hp > 0) q.copy(potions = q.potions + 1) else q }
+                next = next.copy(phase = Phase.VICTORY, kills = next.kills + 1).withLog("${m.emoji} ${m.name} is defeated! Everyone standing finds a potion.")
+            } else if (players.values.all { it.hp <= 0 }) next = next.copy(phase = Phase.DEFEAT).withLog("The party falls. ${m.name} gloats.")
+            next.copy(players = players)
         }
+        if (wind && playerId == selfId) buzz(40, 40, 40, 40, 40)
         broadcast()
         if (killed) {
             if (playerId == selfId) buzz(40, 60, 40, 60, 200)
@@ -387,7 +425,7 @@ class GameSession(private val app: Application) {
     fun nextEncounter() {
         if (role.value != Role.HOST) return
         steps.reset()
-        state.update { s -> s.copy(phase = Phase.EXPLORE, monster = null, steps = 0, players = s.players.mapValues { (_, p) -> p.copy(hp = maxOf(p.hp, p.maxHp / 2)) }).withLog("The party regroups. Walk around, then point at something new.") }
+        state.update { s -> s.copy(phase = Phase.EXPLORE, monster = null, steps = 0, fx = null, players = s.players.mapValues { (_, p) -> p.copy(hp = maxOf(p.hp, p.maxHp / 2), potions = maxOf(p.potions, 1)) }).withLog("The party regroups. Walk around, then point at something new.") }
         broadcast()
     }
 
@@ -415,5 +453,7 @@ class GameSession(private val app: Application) {
         const val FACING_TOLERANCE_DEG = 40f
         const val FLANK_MIN_DEG = 60f
         const val GPS_MIN_METERS = 15f
+        const val POTION_HEAL = 12
+        const val SECOND_WIND_HP = 6
     }
 }

@@ -3,7 +3,22 @@ package com.hocmemini.raid.ui
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.ImageCapture
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.graphics.graphicsLayer
+import kotlinx.coroutines.launch
+import com.hocmemini.raid.game.Fx
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -127,8 +142,9 @@ fun PlayScreen(vm: GameSession) {
         CameraPreview(Modifier.fillMaxSize()) { imageCapture = it }
 
         if (monster != null && state.phase == Phase.BATTLE) {
-            MonsterOverlay(monster, delta = headingDelta(heading, vm.bearingToMonster(monster, self)))
+            MonsterOverlay(monster, delta = headingDelta(heading, vm.bearingToMonster(monster, self)), fx = state.fx)
         }
+        FxLayer(state.fx, vm.selfId)
 
         // top HUD: party, then a status strip
         Column(Modifier.align(Alignment.TopStart).safeDrawingPadding().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -140,7 +156,7 @@ fun PlayScreen(vm: GameSession) {
                             color = if (p.hp > 0) Color.White else Color.Red,
                             fontWeight = if (p.id == vm.selfId) FontWeight.Bold else FontWeight.Normal, fontSize = 13.sp,
                         )
-                        Text("${p.hp}/${p.maxHp} hp · ${p.xp} xp", color = Color.White.copy(alpha = 0.85f), fontSize = 12.sp)
+                        Text("${p.hp}/${p.maxHp} hp · ${p.xp} xp · 🧪${p.potions}", color = Color.White.copy(alpha = 0.85f), fontSize = 12.sp)
                         if (p.items.isNotEmpty()) Text("🎁 " + p.items.takeLast(3).joinToString(" · "), color = Color(0xFFFFD54F), fontSize = 11.sp)
                     }
                 }
@@ -171,6 +187,10 @@ fun PlayScreen(vm: GameSession) {
                 Phase.BATTLE -> {
                     val alive = (self?.hp ?: 1) > 0
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedButton(
+                            { vm.drinkPotion() },
+                            enabled = (self?.potions ?: 0) > 0 && (self?.hp ?: 0) < (self?.maxHp ?: 1),
+                        ) { Text("🧪${self?.potions ?: 0}") }
                         OutlinedTextField(
                             action, { action = it }, modifier = Modifier.weight(1f), singleLine = true,
                             placeholder = { Text(if (alive) "What do you do?" else "You're down — cheer from the floor") }, enabled = alive,
@@ -224,14 +244,62 @@ fun PlayScreen(vm: GameSession) {
     }
 }
 
-/** Heading-locked overlay: the monster slides across the screen as you turn toward its bearing. */
+/** Heading-locked overlay: the monster slides across the screen as you turn toward its bearing, breathes, lunges and dies. */
 @Composable
-private fun MonsterOverlay(m: Monster, delta: Float) {
+private fun MonsterOverlay(m: Monster, delta: Float, fx: Fx?) {
+    val breathe by rememberInfiniteTransition(label = "breathe").animateFloat(
+        0.95f, 1.07f, infiniteRepeatable(tween(850, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "s",
+    )
+    val scale = remember { Animatable(1f) }
+    val lungeY = remember { Animatable(0f) }
+    val shakeX = remember { Animatable(0f) }
+    val flash = remember { Animatable(0f) }
+    val alpha = remember { Animatable(1f) }
+
+    LaunchedEffect(fx?.seq) {
+        val f = fx ?: return@LaunchedEffect
+        if (f.label == "spawn") {
+            alpha.snapTo(0f); scale.snapTo(0.2f)
+            launch { alpha.animateTo(1f, tween(500)) }
+            scale.animateTo(1f, spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow))
+            return@LaunchedEffect
+        }
+        if (f.dealt > 0) {
+            launch { flash.snapTo(0.85f); flash.animateTo(0f, tween(380)) }
+            repeat(4) { shakeX.animateTo(if (it % 2 == 0) 30f else -30f, tween(45)) }
+            shakeX.animateTo(0f, tween(45))
+        }
+        if (f.killed) {
+            scale.animateTo(1.6f, tween(260))
+            launch { alpha.animateTo(0f, tween(550)) }
+            scale.animateTo(0.05f, tween(550))
+            return@LaunchedEffect
+        }
+        if (f.taken > 0 || f.parried) {
+            launch { lungeY.animateTo(420f, tween(220, easing = FastOutLinearInEasing)) }
+            scale.animateTo(1.8f, tween(220, easing = FastOutLinearInEasing))
+            kotlinx.coroutines.delay(140)
+            launch { lungeY.animateTo(0f, tween(320)) }
+            scale.animateTo(1f, spring(dampingRatio = Spring.DampingRatioMediumBouncy))
+        }
+    }
+
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val halfW = maxWidth / 2
         if (abs(delta) <= 45f) {
-            Column(Modifier.align(Alignment.Center).offset(x = halfW * (delta / 45f)), horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(m.emoji, fontSize = 96.sp)
+            Column(
+                Modifier.align(Alignment.Center).offset(x = halfW * (delta / 45f)).graphicsLayer {
+                    scaleX = scale.value * breathe; scaleY = scale.value * breathe
+                    translationX = shakeX.value; translationY = lungeY.value
+                    this.alpha = alpha.value
+                },
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Box(Modifier.width(150.dp).height(150.dp).background(Color.Black.copy(alpha = 0.25f), CircleShape))
+                    Text(m.emoji, fontSize = 110.sp)
+                    if (flash.value > 0f) Box(Modifier.width(150.dp).height(150.dp).background(Color.White.copy(alpha = flash.value), CircleShape))
+                }
                 Card(Modifier.width(260.dp)) {
                     Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(m.name, fontSize = 22.sp, fontWeight = FontWeight.Black)
@@ -247,6 +315,64 @@ private fun MonsterOverlay(m: Monster, delta: Float) {
                 if (delta > 0) "${m.emoji}  turn right  ▶" else "◀  turn left  ${m.emoji}",
                 color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold,
                 modifier = Modifier.align(Alignment.Center).background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(8.dp)).padding(12.dp),
+            )
+        }
+    }
+}
+
+/** Screen-wide effects: slash sweep, floating damage number, red hit flash, banners for crits, parries, potions, kills. */
+@Composable
+private fun FxLayer(fx: Fx?, selfId: String) {
+    val red = remember { Animatable(0f) }
+    val numY = remember { Animatable(0f) }
+    val numA = remember { Animatable(0f) }
+    val banner = remember { Animatable(0f) }
+    val slashX = remember { Animatable(-2f) }
+
+    LaunchedEffect(fx?.seq) {
+        val f = fx ?: return@LaunchedEffect
+        if (f.dealt > 0) {
+            launch { slashX.snapTo(-1.2f); slashX.animateTo(1.2f, tween(380, easing = LinearEasing)); slashX.snapTo(-2f) }
+            launch { numA.snapTo(1f); numY.snapTo(0f); numY.animateTo(-300f, tween(950)); numA.animateTo(0f, tween(250)) }
+        }
+        if (f.parried || f.killed || f.label.isNotBlank() && f.label != "spawn") {
+            launch { banner.snapTo(1f); kotlinx.coroutines.delay(1300); banner.animateTo(0f, tween(450)) }
+        }
+        if (f.taken > 0 && f.playerId == selfId) {
+            kotlinx.coroutines.delay(260)
+            red.snapTo(0.55f); red.animateTo(0f, tween(650))
+        }
+    }
+
+    val bannerText = when {
+        fx == null -> ""
+        fx.killed -> "💥 SLAIN"
+        fx.parried -> "🛡 PARRIED"
+        fx.label == "LEGENDARY!" -> "★ LEGENDARY ★"
+        fx.label == "stylish" -> "★ stylish"
+        fx.label.startsWith("🧪") -> fx.label
+        else -> ""
+    }
+
+    Box(Modifier.fillMaxSize()) {
+        if (red.value > 0f) Box(Modifier.fillMaxSize().background(Color.Red.copy(alpha = red.value)))
+        if (slashX.value > -1.5f) {
+            Text("⚔️", fontSize = 84.sp, modifier = Modifier.align(Alignment.Center).graphicsLayer {
+                translationX = slashX.value * 650f; rotationZ = slashX.value * 70f
+            })
+        }
+        if (numA.value > 0f && fx != null && fx.dealt > 0) {
+            Text(
+                "−${fx.dealt}", color = if (fx.crit) Color(0xFFFFD54F) else Color.White, fontSize = 52.sp, fontWeight = FontWeight.Black,
+                modifier = Modifier.align(Alignment.Center).graphicsLayer { translationY = numY.value - 230f; alpha = numA.value },
+            )
+        }
+        if (banner.value > 0f && bannerText.isNotBlank()) {
+            Text(
+                bannerText, color = Color(0xFFFFD54F), fontSize = 40.sp, fontWeight = FontWeight.Black,
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = 170.dp)
+                    .graphicsLayer { alpha = banner.value; scaleX = 0.7f + 0.3f * banner.value; scaleY = 0.7f + 0.3f * banner.value }
+                    .background(Color.Black.copy(alpha = 0.45f), RoundedCornerShape(12.dp)).padding(horizontal = 16.dp, vertical = 6.dp),
             )
         }
     }

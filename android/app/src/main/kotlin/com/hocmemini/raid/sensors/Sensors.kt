@@ -76,22 +76,31 @@ fun distanceMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Floa
     return out[0]
 }
 
-/** Steps walked since the last reset (hardware step counter; needs ACTIVITY_RECOGNITION). */
+/** Steps since the last reset. Counts per-step detector events (instant) and falls back to the batched hardware counter. */
 class StepCounter(context: Context) : SensorEventListener {
     private val sm = context.getSystemService(SensorManager::class.java)
+    private val counter = sm.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
+    private val detector = sm.getDefaultSensor(Sensor.TYPE_STEP_DETECTOR)
     private val _sinceReset = MutableStateFlow(0)
     val sinceReset: StateFlow<Int> = _sinceReset
+    private var detected = 0
     private var base = -1f
     private var latest = 0f
 
-    fun start() { sm.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL) } }
+    fun start() {
+        detector?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_FASTEST) }
+        counter?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL) }
+    }
     fun stop() = sm.unregisterListener(this)
-    fun reset() { base = latest; _sinceReset.value = 0 }
+    fun reset() { detected = 0; base = latest; _sinceReset.value = 0 }
 
     override fun onSensorChanged(e: SensorEvent) {
-        latest = e.values[0]
-        if (base < 0) base = latest
-        _sinceReset.value = (latest - base).toInt()
+        when (e.sensor) {
+            detector -> detected += 1
+            counter -> { latest = e.values[0]; if (base < 0) base = latest }
+        }
+        val fromCounter = if (base >= 0) (latest - base).toInt() else 0
+        _sinceReset.value = maxOf(detected, fromCounter)
     }
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 }

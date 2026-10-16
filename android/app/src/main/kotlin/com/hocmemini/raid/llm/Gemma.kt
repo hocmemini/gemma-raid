@@ -20,7 +20,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 data class SpawnedMonster(val name: String, val hp: Int, val attacks: List<String>, val weakness: String, val flavor: String, val emoji: String)
-data class Resolved(val damageToMonster: Int, val damageToPlayer: Int, val narration: String)
+data class Resolved(val damageToMonster: Int, val damageToPlayer: Int, val narration: String, val style: Int)
 data class Loot(val name: String, val effect: String)
 data class OmenText(val name: String, val lore: String, val threat: Int)
 
@@ -44,6 +44,7 @@ class GameTools : ToolSet {
         @ToolParam(description = "One single emoji that best represents this monster") emoji: String,
     ): Map<String, Any> {
         spawned = SpawnedMonster(name, hp.coerceIn(10, 80), attacks, weakness, flavor, emoji.take(4).ifBlank { "👾" })
+        Log.i("Gemma", "spawn_monster $name hp=$hp weak=$weakness attacks=$attacks | $flavor")
         return mapOf("ok" to true)
     }
 
@@ -51,9 +52,11 @@ class GameTools : ToolSet {
     fun resolve_action(
         @ToolParam(description = "Damage this action deals to the monster, 0 to 15. Use the top of the range if it exploits the weakness or a carried item, 0 if it is nonsense or cowardly.") damageToMonster: Int,
         @ToolParam(description = "Damage the monster deals back to this player, 0 to 8") damageToPlayer: Int,
-        @ToolParam(description = "One or two punchy sentences narrating the exchange in second person") narration: String,
+        @ToolParam(description = "One or two punchy sentences narrating the exchange in second person. Describe the blow and its effect; never say the monster or player is dead or defeated.") narration: String,
+        @ToolParam(description = "How creative, funny or specific the action was: 1 boring or repeated, 3 decent, 5 legendary. Absurd ideas that fit the object score high.") style: Int,
     ): Map<String, Any> {
-        resolved = Resolved(damageToMonster.coerceIn(0, 30), damageToPlayer.coerceIn(0, 12), narration)
+        resolved = Resolved(damageToMonster.coerceIn(0, 30), damageToPlayer.coerceIn(0, 12), narration, style.coerceIn(1, 5))
+        Log.i("Gemma", "resolve_action dmg=$damageToMonster hurt=$damageToPlayer style=$style | $narration")
         return mapOf("ok" to true)
     }
 
@@ -231,7 +234,9 @@ class Gemma(private val modelPath: String, private val useGpu: Boolean) {
         private const val MAX_TURNS_PER_CONVERSATION = 8
         const val SYSTEM_PROMPT = """You are the dungeon master of a co-op augmented-reality RPG played in a real room.
 Real objects seen through the phone camera become monsters. Be vivid, funny and fast. Keep every reply under 40 words.
-Always use the provided tools to report game effects; never invent numbers in prose."""
+Always use the provided tools to report game effects; never invent numbers in prose.
+Reward wit: an absurd, specific, funny action that fits the object (a TSA liquid check on a bag, a firmware update on a printer) is a legendary blow — top damage and style 5. Vague or repeated actions do little.
+Never declare the monster or a player dead, defeated or victorious; the game engine decides and announces that. Describe the blow and its effect only."""
         const val SPAWN_PROMPT = """Look at this photo. Pick the most prominent object or feature and turn it into a monster.
 Call spawn_monster with a name, hp, attacks, a weakness, flavor text and an emoji, then say one short line to the players."""
     }

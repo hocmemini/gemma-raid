@@ -33,6 +33,22 @@ data class Player(
     val xp: Int = 0,
     val level: Int = 1,
     val items: List<String> = emptyList(),
+    val potions: Int = 2,
+    /** Once per raid: at 0 HP you get back up with a few HP instead of going down. */
+    val secondWind: Boolean = true,
+)
+
+/** One exchange's visual effects; the UI animates whenever seq changes. */
+@Serializable
+data class Fx(
+    val seq: Int,
+    val playerId: String = "",
+    val dealt: Int = 0,
+    val taken: Int = 0,
+    val crit: Boolean = false,
+    val parried: Boolean = false,
+    val killed: Boolean = false,
+    val label: String = "",
 )
 
 /** A nearby Wi-Fi/Bluetooth signal that Gemma turned into lore. */
@@ -56,6 +72,7 @@ data class GameState(
     /** Players with a parry armed (double twist). */
     val parries: List<String> = emptyList(),
     val omens: List<Omen> = emptyList(),
+    val fx: Fx? = null,
     /** Set when the strongest omen is menacing enough: the next spawn is its boss. */
     val bossLair: Omen? = null,
 ) {
@@ -74,6 +91,9 @@ sealed class Msg {
     /** Precedes a STREAM payload carrying a WAV clip of the player's spoken action. */
     @Serializable @SerialName("audio")
     data class AudioHeader(val playerId: String, val headingDeg: Float, val lat: Double, val lon: Double, val bytes: Int) : Msg()
+
+    @Serializable @SerialName("potion")
+    data class Potion(val playerId: String) : Msg()
 
     /** The player twisted the phone: block the monster's next hit on them. */
     @Serializable @SerialName("parry")
