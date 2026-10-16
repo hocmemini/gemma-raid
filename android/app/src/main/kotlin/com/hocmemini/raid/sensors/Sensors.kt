@@ -75,3 +75,23 @@ fun distanceMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Floa
     Location.distanceBetween(lat1, lon1, lat2, lon2, out)
     return out[0]
 }
+
+/** Steps walked since the last reset (hardware step counter; needs ACTIVITY_RECOGNITION). */
+class StepCounter(context: Context) : SensorEventListener {
+    private val sm = context.getSystemService(SensorManager::class.java)
+    private val _sinceReset = MutableStateFlow(0)
+    val sinceReset: StateFlow<Int> = _sinceReset
+    private var base = -1f
+    private var latest = 0f
+
+    fun start() { sm.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)?.let { sm.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL) } }
+    fun stop() = sm.unregisterListener(this)
+    fun reset() { base = latest; _sinceReset.value = 0 }
+
+    override fun onSensorChanged(e: SensorEvent) {
+        latest = e.values[0]
+        if (base < 0) base = latest
+        _sinceReset.value = (latest - base).toInt()
+    }
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+}

@@ -19,8 +19,9 @@ import com.google.ai.edge.litertlm.tool
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-data class SpawnedMonster(val name: String, val hp: Int, val attacks: List<String>, val weakness: String, val flavor: String)
+data class SpawnedMonster(val name: String, val hp: Int, val attacks: List<String>, val weakness: String, val flavor: String, val emoji: String)
 data class Resolved(val damageToMonster: Int, val damageToPlayer: Int, val narration: String)
+data class Loot(val name: String, val effect: String)
 
 /**
  * The tools Gemma 4 calls. LiteRT-LM runs them automatically mid-generation; they just stash
@@ -29,6 +30,7 @@ data class Resolved(val damageToMonster: Int, val damageToPlayer: Int, val narra
 class GameTools : ToolSet {
     @Volatile var spawned: SpawnedMonster? = null
     @Volatile var resolved: Resolved? = null
+    @Volatile var loot: Loot? = null
 
     @Tool(description = "Turn the real-world object or scene in the photo into the monster the players must fight. Call exactly once.")
     fun spawn_monster(
@@ -37,18 +39,28 @@ class GameTools : ToolSet {
         @ToolParam(description = "Two or three attack names themed on the object") attacks: List<String>,
         @ToolParam(description = "One short phrase for what it is weak against, something players could plausibly do or find nearby") weakness: String,
         @ToolParam(description = "One or two vivid sentences introducing the monster to the players") flavor: String,
+        @ToolParam(description = "One single emoji that best represents this monster") emoji: String,
     ): Map<String, Any> {
-        spawned = SpawnedMonster(name, hp.coerceIn(10, 80), attacks, weakness, flavor)
+        spawned = SpawnedMonster(name, hp.coerceIn(10, 80), attacks, weakness, flavor, emoji.take(4).ifBlank { "👾" })
         return mapOf("ok" to true)
     }
 
     @Tool(description = "Resolve one player's action against the monster. Call exactly once per action.")
     fun resolve_action(
-        @ToolParam(description = "Damage this action deals to the monster, 0 to 15. Use the top of the range if it exploits the weakness, 0 if it is nonsense or cowardly.") damageToMonster: Int,
+        @ToolParam(description = "Damage this action deals to the monster, 0 to 15. Use the top of the range if it exploits the weakness or a carried item, 0 if it is nonsense or cowardly.") damageToMonster: Int,
         @ToolParam(description = "Damage the monster deals back to this player, 0 to 8") damageToPlayer: Int,
         @ToolParam(description = "One or two punchy sentences narrating the exchange in second person") narration: String,
     ): Map<String, Any> {
         resolved = Resolved(damageToMonster.coerceIn(0, 30), damageToPlayer.coerceIn(0, 12), narration)
+        return mapOf("ok" to true)
+    }
+
+    @Tool(description = "Give the players an item salvaged from the defeated monster's real-world object. Call exactly once.")
+    fun drop_loot(
+        @ToolParam(description = "Short item name, e.g. 'Cable of Binding'") name: String,
+        @ToolParam(description = "One short sentence: what it does in future fights") effect: String,
+    ): Map<String, Any> {
+        loot = Loot(name.take(40), effect.take(120))
         return mapOf("ok" to true)
     }
 }
@@ -57,6 +69,7 @@ class GameTools : ToolSet {
 class Gemma(private val modelPath: String, private val useGpu: Boolean) {
     private var engine: Engine? = null
     private var conversation: Conversation? = null
+    private var turns = 0
     val tools = GameTools()
 
     suspend fun load(onStatus: (String) -> Unit) = withContext(Dispatchers.IO) {
@@ -76,14 +89,16 @@ class Gemma(private val modelPath: String, private val useGpu: Boolean) {
         )
         e.initialize()
         engine = e
-        onStatus("Gemma ready in ${(System.currentTimeMillis() - t0) / 1000}s")
+        val secs = (System.currentTimeMillis() - t0) / 1000
+        Log.i(TAG, "engine ready in ${secs}s (gpu=$useGpu)")
+        onStatus("Gemma ready in ${secs}s")
     }
 
-    private fun newConversation(): Conversation {
+    private fun newConversation(extraSystem: String = ""): Conversation {
         conversation?.close()
         val c = engine!!.createConversation(
             ConversationConfig(
-                systemInstruction = Contents.of(SYSTEM_PROMPT),
+                systemInstruction = Contents.of(SYSTEM_PROMPT + extraSystem),
                 tools = listOf(tool(tools)),
                 samplerConfig = SamplerConfig(topK = 40, topP = 0.95, temperature = 0.9),
                 thinkingConfig = ThinkingConfig(false, 0),
@@ -91,18 +106,35 @@ class Gemma(private val modelPath: String, private val useGpu: Boolean) {
             )
         )
         conversation = c
+        turns = 0
         return c
     }
 
+    /** Send on the current conversation; if the runtime chokes (e.g. context full), start a fresh one and retry once. */
+    private fun send(contents: Contents): Message {
+        val c = conversation ?: newConversation()
+        turns++
+        return try {
+            c.sendMessage(contents)
+        } catch (e: Exception) {
+            Log.w(TAG, "sendMessage failed (${e.message}); resetting conversation")
+            newConversation().sendMessage(contents)
+        }
+    }
+
     /** Photo of a real object -> monster via the spawn_monster tool. Starts a fresh conversation. */
-    suspend fun spawn(imagePath: String): Pair<SpawnedMonster?, String> = withContext(Dispatchers.IO) {
+    suspend fun spawn(imagePath: String, stepsWalked: Int): Pair<SpawnedMonster?, String> = withContext(Dispatchers.IO) {
         tools.spawned = null
-        val c = newConversation()
+        newConversation()
+        val prompt = buildString {
+            append(SPAWN_PROMPT)
+            if (stepsWalked > 30) append(" The players walked $stepsWalked steps to find it, so make it bigger and nastier than usual.")
+        }
         val t0 = System.currentTimeMillis()
-        var reply = c.sendMessage(Contents.of(Content.ImageFile(imagePath), Content.Text(SPAWN_PROMPT)))
+        var reply = send(Contents.of(Content.ImageFile(imagePath), Content.Text(prompt)))
         if (tools.spawned == null) {
             Log.w(TAG, "no spawn_monster call; retrying once")
-            reply = c.sendMessage("You must call the spawn_monster tool for the object in the photo now, then say one short line.")
+            reply = send(Contents.of("You must call the spawn_monster tool for the object in the photo now, then say one short line."))
         }
         Log.i(TAG, "spawn took ${System.currentTimeMillis() - t0} ms; tool=${tools.spawned != null}")
         tools.spawned to reply.plainText()
@@ -121,11 +153,15 @@ class Gemma(private val modelPath: String, private val useGpu: Boolean) {
         weakness: String,
         facing: Boolean,
         flanking: Boolean,
+        items: List<String>,
     ): Pair<Resolved?, String> = withContext(Dispatchers.IO) {
         tools.resolved = null
-        val c = conversation ?: newConversation()
+        if (turns >= MAX_TURNS_PER_CONVERSATION) {
+            newConversation(" A battle is in progress: $monsterName (HP $monsterHp, weak to $weakness) fights the players.")
+        }
         val situation = buildString {
             append("$playerName acts against $monsterName (HP $monsterHp, weak to: $weakness). ")
+            if (items.isNotEmpty()) append("$playerName carries: ${items.joinToString(", ")}. An item that fits the action makes it stronger. ")
             if (!facing) append("They are NOT facing the monster, so the action mostly misses. ")
             if (flanking) append("Another player is attacking from a different side, so this is a flanking strike. ")
             if (audioWav != null) append("Their action is spoken in the attached audio clip. ")
@@ -133,14 +169,24 @@ class Gemma(private val modelPath: String, private val useGpu: Boolean) {
             append("Call resolve_action.")
         }
         val t0 = System.currentTimeMillis()
-        var reply = if (audioWav != null) c.sendMessage(Contents.of(Content.AudioBytes(audioWav), Content.Text(situation)))
-                    else c.sendMessage(situation)
+        var reply = if (audioWav != null) send(Contents.of(Content.AudioBytes(audioWav), Content.Text(situation)))
+                    else send(Contents.of(situation))
         if (tools.resolved == null) {
             Log.w(TAG, "no resolve_action call; retrying once")
-            reply = c.sendMessage("You must call the resolve_action tool for that action now, then reply in one sentence.")
+            reply = send(Contents.of("You must call the resolve_action tool for that action now, then reply in one sentence."))
         }
         Log.i(TAG, "resolve took ${System.currentTimeMillis() - t0} ms; tool=${tools.resolved != null}; audio=${audioWav != null}")
         tools.resolved to reply.plainText()
+    }
+
+    /** After a kill: ask for an item salvaged from the object. */
+    suspend fun loot(monsterName: String, playerName: String): Pair<Loot?, String> = withContext(Dispatchers.IO) {
+        tools.loot = null
+        val t0 = System.currentTimeMillis()
+        var reply = send(Contents.of("$monsterName is defeated, $playerName landed the final blow! Call drop_loot with an item salvaged from the real object it came from, then say one triumphant line."))
+        if (tools.loot == null) reply = send(Contents.of("Call the drop_loot tool now."))
+        Log.i(TAG, "loot took ${System.currentTimeMillis() - t0} ms; tool=${tools.loot != null}")
+        tools.loot to reply.plainText()
     }
 
     fun close() {
@@ -153,10 +199,11 @@ class Gemma(private val modelPath: String, private val useGpu: Boolean) {
 
     companion object {
         private const val TAG = "Gemma"
+        private const val MAX_TURNS_PER_CONVERSATION = 8
         const val SYSTEM_PROMPT = """You are the dungeon master of a co-op augmented-reality RPG played in a real room.
 Real objects seen through the phone camera become monsters. Be vivid, funny and fast. Keep every reply under 40 words.
 Always use the provided tools to report game effects; never invent numbers in prose."""
         const val SPAWN_PROMPT = """Look at this photo. Pick the most prominent object or feature and turn it into a monster.
-Call spawn_monster with a name, hp, attacks, a weakness and flavor text, then say one short line to the players."""
+Call spawn_monster with a name, hp, attacks, a weakness, flavor text and an emoji, then say one short line to the players."""
     }
 }

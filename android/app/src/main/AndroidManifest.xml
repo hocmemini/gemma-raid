@@ -16,8 +16,10 @@
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
 
     <application
+        android:name=".RaidApplication"
         android:label="@string/app_name"
         android:icon="@android:drawable/ic_menu_compass"
         android:theme="@android:style/Theme.Material.NoActionBar"

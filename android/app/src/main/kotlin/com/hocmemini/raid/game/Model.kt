@@ -18,6 +18,7 @@ data class Monster(
     val bearingDeg: Float,
     val lat: Double,
     val lon: Double,
+    val emoji: String = "👾",
 )
 
 @Serializable
@@ -29,6 +30,9 @@ data class Player(
     val headingDeg: Float = 0f,
     val lat: Double = 0.0,
     val lon: Double = 0.0,
+    val xp: Int = 0,
+    val level: Int = 1,
+    val items: List<String> = emptyList(),
 )
 
 @Serializable
@@ -40,6 +44,9 @@ data class GameState(
     val turn: Int = 0,
     /** Set by the host while Gemma is thinking so clients can show a spinner. */
     val busy: Boolean = false,
+    val kills: Int = 0,
+    /** Steps the host walked since the last fight; feeds monster size. */
+    val steps: Int = 0,
 ) {
     fun withLog(line: String): GameState = copy(log = (log + line).takeLast(40))
 }
@@ -71,3 +78,6 @@ fun headingDelta(fromDeg: Float, toDeg: Float): Float {
     if (d <= -180f) d += 360f
     return d
 }
+
+fun levelFor(xp: Int): Int = 1 + xp / 100
+fun maxHpFor(level: Int): Int = 20 + 5 * (level - 1)
