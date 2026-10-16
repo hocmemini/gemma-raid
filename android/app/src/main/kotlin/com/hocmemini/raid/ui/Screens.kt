@@ -169,6 +169,15 @@ fun LobbyScreen(vm: GameSession, onStats: () -> Unit, onJournal: () -> Unit, onM
         OutlinedButton({ vm.join(name) }, enabled = name.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
             Text("Join a nearby host")
         }
+        var howTo by remember { mutableStateOf(false) }
+        TextButton({ howTo = !howTo }, modifier = Modifier.fillMaxWidth()) { Text(if (howTo) "Hide how to play" else "❓ How to play") }
+        if (howTo) Card { Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("1. Host. Walk around; things you pass may start following you.", style = MaterialTheme.typography.bodyMedium)
+            Text("2. Aim the reticle at anything and Spawn. It becomes the monster, in its own voice.", style = MaterialTheme.typography.bodyMedium)
+            Text("3. Turn to face it. Shout your move, type it, or swing the phone. Wit hits harder than force.", style = MaterialTheme.typography.bodyMedium)
+            Text("4. Twist to parry. Potions heal. Run if you must. Loot, level, unlock Taunt, Parley, Bind, Recast.", style = MaterialTheme.typography.bodyMedium)
+            Text("5. Meet an object instead to trade, heal or get a tip. Friends join over Bluetooth, no internet.", style = MaterialTheme.typography.bodyMedium)
+        } }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
             TextButton(onStats) { Text("📊 Stats") }
             TextButton(onJournal) { Text("📖 Journal") }

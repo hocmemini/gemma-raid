@@ -34,6 +34,12 @@ adjudicates every move through function calls so the game state stays determinis
 
 Every game-affecting number comes out of a tool call, never parsed from prose. Open weights are the whole game: nothing works without the model on the phone.
 
+## Install the APK
+Grab `raid-debug.apk` from the [latest release](https://github.com/hocmemini/gemma-raid/releases/latest), install it on an
+Android 12+ phone, open **Brain** and tap **Download** for Gemma 4 E2B (2.6 GB, once). Then Host.
+
+![lobby](docs/screenshots/lobby.png)
+
 ## Build (no Android Studio needed)
 
 ```bash

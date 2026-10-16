@@ -684,6 +684,12 @@ class GameSession(private val app: Application) {
         val me = s.players[selfId]
         val name = runCatching { TrophyCard.save(app, TrophyCard.render(app, v, m?.sprite ?: "", me?.epithet ?: ""), v.name) }.getOrNull()
         status.value = if (name != null) "trophy saved to Pictures/Raid" else "could not save the trophy"
+        if (name != null) TrophyCard.lastUri?.let { uri ->
+            runCatching {
+                val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply { type = "image/png"; putExtra(android.content.Intent.EXTRA_STREAM, uri); putExtra(android.content.Intent.EXTRA_TEXT, "Slain in Raid — a real object, judged by Gemma 4 on my phone. https://github.com/hocmemini/gemma-raid"); addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+                app.startActivity(android.content.Intent.createChooser(send, "Share your trophy").addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+            }
+        }
         state.update { it.withLog(if (name != null) "🏆 Trophy card saved to Pictures/Raid" else "🏆 Trophy card failed to save") }
         broadcast()
     }

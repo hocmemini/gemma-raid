@@ -57,6 +57,9 @@ object TrophyCard {
     }
 
     /** Saves to Pictures/Raid via MediaStore (no permission needed on Android 10+). Returns the display name. */
+    /** Last saved card, for sharing. */
+    @Volatile var lastUri: android.net.Uri? = null
+
     fun save(context: Context, bmp: Bitmap, baseName: String): String? {
         val name = "raid-" + baseName.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-').take(40) + "-" + System.currentTimeMillis() / 1000 + ".png"
         val values = ContentValues().apply {
@@ -66,6 +69,7 @@ object TrophyCard {
         }
         val uri = context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return null
         context.contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) } ?: return null
+        lastUri = uri
         return name
     }
 }
