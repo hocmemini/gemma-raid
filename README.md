@@ -1,6 +1,8 @@
 # Raid — a co-op AR RPG where Gemma 4 is the dungeon master
 
-*Working title. Built in one day at MLH Hacktoberfest Hack Day (Draper x AMH), 2026-10-16.*
+*Built in one day at MLH Hacktoberfest Hack Day (Draper x AMH), 2026-10-16.*
+
+🏆 **Winner — Best Open-Source AI Project (DigitalOcean)**, one of the two winning projects of the hack day. The whole stack is open weights (Gemma 4 E2B, Apache-2.0) running on the phone, in an Apache-2.0 repo.
 
 Point your phone at anything in the room. **Gemma 4 E2B, running entirely on the phone**, turns it into a
 monster. Your friends' phones connect to yours over Bluetooth / Wi-Fi Direct — no internet, no server — and
@@ -90,7 +92,9 @@ reconnects keeps their HP, XP and items. Logs: tag `NearbyLink`.
 ## Since submission (same day, still going)
 Quests board driven by real events · monster voices and NPC personas · the DM names your dungeon · chiptune
 battle/explore loops, heartbeat under 30% HP · crit screen shake, danger vignette, confetti · host↔client pings with
-latency chips · cache sweeping. Every commit after 15:35 MDT is polish on the submitted design.
+latency chips · cache sweeping · smith NPCs that reforge carried items for XP (⚒ tiers raise the item damage bonus). Every commit after 15:35 MDT is polish on the submitted design.
+
+The project was announced as a winner at about 16:00 MDT.
 
 ## License
 

@@ -13,3 +13,4 @@ android/.idea/
 *.iml
 # misc
 .DS_Store
+logs/
