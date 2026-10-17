@@ -1,7 +1,7 @@
 # Raid — submission write-up
 
 **Categories:** Best Use of Gemma 4 (Google DeepMind) · Best Open-Source AI Project (DigitalOcean)
-**Result:** 🏆 Winner, Best Open-Source AI Project (DigitalOcean) — one of two winning projects
+**Result:** 🏆 Winner, Best Use of Gemma 4 (Google DeepMind) — one of two winning projects of 10 ([gallery](https://www.mlh.com/events/hacktoberfest-hack-day-draper-x-amh/submissions))
 **Repo:** https://github.com/hocmemini/gemma-raid (Apache-2.0) · **Built:** one day, MLH Hacktoberfest Hack Day Draper x AMH, 2026-10-16
 
 ## Inspiration

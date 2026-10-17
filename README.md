@@ -2,7 +2,7 @@
 
 *Built in one day at MLH Hacktoberfest Hack Day (Draper x AMH), 2026-10-16.*
 
-🏆 **Winner — Best Open-Source AI Project (DigitalOcean)**, one of the two winning projects of the hack day. The whole stack is open weights (Gemma 4 E2B, Apache-2.0) running on the phone, in an Apache-2.0 repo.
+🏆 **Winner — Best Use of Gemma 4 (Google DeepMind)**, one of the two winning projects out of 10 submissions. Gemma 4 E2B runs fully on the phone through LiteRT-LM: vision, audio and function calling, no server. [Official results](https://www.mlh.com/events/hacktoberfest-hack-day-draper-x-amh/submissions).
 
 Point your phone at anything in the room. **Gemma 4 E2B, running entirely on the phone**, turns it into a
 monster. Your friends' phones connect to yours over Bluetooth / Wi-Fi Direct — no internet, no server — and
@@ -94,7 +94,7 @@ Quests board driven by real events · monster voices and NPC personas · the DM 
 battle/explore loops, heartbeat under 30% HP · crit screen shake, danger vignette, confetti · host↔client pings with
 latency chips · cache sweeping · smith NPCs that reforge carried items for XP (⚒ tiers raise the item damage bonus). Every commit after 15:35 MDT is polish on the submitted design.
 
-The project was announced as a winner at about 16:00 MDT.
+Winners were announced at about 16:00 MDT and are posted in the [event gallery](https://www.mlh.com/events/hacktoberfest-hack-day-draper-x-amh/submissions).
 
 ## License
 
